@@ -9,7 +9,7 @@ import {
   setConnectsExhaustedAt,
 } from './db.js';
 import { generateTailoredMessage } from './messageGenerator.js';
-import { humanDelay, humanScroll, humanType, humanClick } from './humanDelay.js';
+import { pause, fastFill, fastClick } from './humanDelay.js';
 
 const LOGIN_URL = 'https://v2.onlinejobs.ph/login';
 const BASE_SEARCH = 'https://www.onlinejobs.ph/jobseekers/jobsearch?jobkeyword=';
@@ -30,24 +30,38 @@ function buildSearchUrl(keyword, page = 1) {
 
 export function parsePostedDate(text) {
   const lower = (text || '').toLowerCase();
-  const now = new Date();
+  const today = new Date().toISOString().slice(0, 10);
+
+  const postedOn = text?.match(/posted on (\d{4}-\d{2}-\d{2})/i);
+  if (postedOn) {
+    if (postedOn[1] === today) return { score: 100, label: 'Today' };
+    const days = Math.floor((Date.now() - new Date(postedOn[1]).getTime()) / 86400000);
+    if (days === 1) return { score: 75, label: 'Yesterday' };
+    if (days <= 7) return { score: 50, label: `${days}d ago` };
+    return { score: 10, label: postedOn[1] };
+  }
 
   if (/posted\s+today|\btoday\b|hours?\s+ago|\d+\s*h\s+ago/i.test(lower)) {
     return { score: 100, label: 'Today' };
   }
-  if (/yesterday|1\s+day\s+ago/i.test(lower)) {
-    return { score: 75, label: 'Yesterday' };
-  }
+  if (/yesterday|1\s+day\s+ago/i.test(lower)) return { score: 75, label: 'Yesterday' };
+
   const daysMatch = lower.match(/(\d+)\s+days?\s+ago/i);
   if (daysMatch) {
     const days = parseInt(daysMatch[1], 10);
     return { score: Math.max(10, 70 - days * 15), label: `${days}d ago` };
   }
-  const weeksMatch = lower.match(/(\d+)\s+weeks?\s+ago/i);
-  if (weeksMatch) {
-    return { score: 5, label: `${weeksMatch[1]}w ago` };
-  }
   return { score: 20, label: 'Older' };
+}
+
+function parseConnectsFromText(text) {
+  if (!text) return null;
+  const match =
+    text.match(/(\d+)\s*apply\s*points?\s*left/i) ||
+    text.match(/(\d+)\s*connects?\s*remaining/i) ||
+    text.match(/remaining\s*connects?\s*[:\s]*(\d+)/i) ||
+    text.match(/(\d+)\s*\/\s*(\d+)\s*connects?/i);
+  return match ? parseInt(match[1], 10) : null;
 }
 
 export class JobApplicationAgent {
@@ -59,6 +73,7 @@ export class JobApplicationAgent {
     this.page = null;
     this.running = false;
     this.stopped = false;
+    this.connectsRemaining = null;
     this.status = {
       state: 'idle',
       currentAction: 'Ready to start',
@@ -87,13 +102,29 @@ export class JobApplicationAgent {
     this.emit('log', { timestamp: new Date().toISOString(), level, message, jobTitle, jobUrl });
   }
 
-  async wait(type = 'medium') {
-    await humanDelay(type, (msg) => this.log(msg));
+  hasConnectsLeft(connects) {
+    const n = connects ?? this.connectsRemaining;
+    if (n === null) return true;
+    return n > MIN_CONNECTS_RESERVE;
   }
 
-  hasConnectsLeft(connects) {
-    if (connects === null) return true;
-    return connects > MIN_CONNECTS_RESERVE;
+  async updateConnects(connects) {
+    if (connects === null) return;
+    this.connectsRemaining = connects;
+    this.updateStatus({ connectsRemaining: connects });
+    updateTodayStats({ connectsRemaining: connects });
+    this.log(`Apply points remaining: ${connects}`);
+  }
+
+  async readConnectsFromCurrentPage() {
+    try {
+      const text = await this.page.textContent('body');
+      const connects = parseConnectsFromText(text);
+      if (connects !== null) await this.updateConnects(connects);
+      return connects;
+    } catch {
+      return this.connectsRemaining;
+    }
   }
 
   async stopNoConnects() {
@@ -102,11 +133,11 @@ export class JobApplicationAgent {
     updateTodayStats({ connectsRemaining: 0, stoppedReason: 'no_connects' });
     this.updateStatus({
       state: 'stopped_no_connects',
-      currentAction: 'Connects exhausted — auto-resume in 24 hours',
+      currentAction: 'Apply points at zero — auto-resume in 24 hours',
       connectsRemaining: 0,
       resumeAt,
     });
-    this.log('Connects at zero — agent stopped. Will auto-resume in 24 hours.', { level: 'warn' });
+    this.log('Apply points at zero — stopping. Auto-resume in 24h.', { level: 'warn' });
   }
 
   async start() {
@@ -115,11 +146,7 @@ export class JobApplicationAgent {
     this.stopped = false;
 
     const stats = getTodayStats();
-    this.updateStatus({
-      state: 'starting',
-      currentAction: 'Launching browser',
-      jobsAppliedToday: stats.jobs_applied,
-    });
+    this.updateStatus({ state: 'starting', currentAction: 'Launching browser', jobsAppliedToday: stats.jobs_applied });
 
     try {
       await this.launchBrowser();
@@ -139,16 +166,13 @@ export class JobApplicationAgent {
 
   stop() {
     this.stopped = true;
-    this.log('Stop requested by user', { level: 'warn' });
+    this.log('Stop requested', { level: 'warn' });
     this.updateStatus({ state: 'stopping', currentAction: 'Stopping...' });
   }
 
   async launchBrowser() {
-    this.log('Launching Chromium browser');
-    this.browser = await chromium.launch({
-      headless: process.env.HEADLESS !== 'false',
-      slowMo: 80,
-    });
+    this.log('Launching browser');
+    this.browser = await chromium.launch({ headless: process.env.HEADLESS !== 'false' });
     this.context = await this.browser.newContext({
       viewport: { width: 1280, height: 900 },
       userAgent:
@@ -162,75 +186,45 @@ export class JobApplicationAgent {
     const password = process.env.OJ_PASSWORD;
     if (!email || !password) throw new Error('OJ_EMAIL and OJ_PASSWORD must be set in .env');
 
-    this.updateStatus({ state: 'logging_in', currentAction: 'Logging in to OnlineJobs.ph' });
-    await this.page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await this.wait('page_read');
+    this.updateStatus({ state: 'logging_in', currentAction: 'Logging in' });
+    await this.page.goto(LOGIN_URL, { waitUntil: 'networkidle', timeout: 60000 });
 
     const emailInput = this.page.locator('input[type="email"], input[name="email"], input#email').first();
     const passwordInput = this.page.locator('input[type="password"], input[name="password"]').first();
 
     await emailInput.waitFor({ state: 'visible', timeout: 15000 });
-    await humanType(this.page, emailInput, email);
-    await this.wait('form_field');
-    await humanType(this.page, passwordInput, password);
-    await this.wait('before_click');
+    await emailInput.fill(email);
+    await passwordInput.fill(password);
 
-    const submitBtn = this.page.locator('button[type="submit"], button:has-text("Log in"), button:has-text("Login")').first();
     await Promise.all([
-      this.page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {}),
-      humanClick(this.page, submitBtn),
+      this.page.waitForNavigation({ waitUntil: 'networkidle', timeout: 60000 }).catch(() => {}),
+      this.page.locator('button[type="submit"], button:has-text("Log in"), button:has-text("Login")').first().click(),
     ]);
-    await this.wait('after_login');
 
     if (this.page.url().includes('/login')) {
-      throw new Error('Login failed — check credentials in .env');
+      throw new Error('Login failed — check credentials');
     }
 
     this.log('Login successful');
-    await this.readConnects();
-  }
-
-  async readConnects() {
-    try {
-      await this.page.goto('https://www.onlinejobs.ph/jobseekers', {
-        waitUntil: 'domcontentloaded',
-        timeout: 30000,
-      });
-      await this.wait('short');
-      await humanScroll(this.page);
-
-      const pageText = await this.page.textContent('body');
-      const match =
-        pageText?.match(/(\d+)\s*connects?\s*remaining/i) ||
-        pageText?.match(/remaining\s*connects?\s*[:\s]*(\d+)/i) ||
-        pageText?.match(/(\d+)\s*\/\s*(\d+)\s*connects?/i);
-
-      const connects = match ? parseInt(match[1], 10) : null;
-      if (connects !== null) {
-        this.updateStatus({ connectsRemaining: connects });
-        updateTodayStats({ connectsRemaining: connects });
-        this.log(`Connects remaining: ${connects}`);
-      }
-      return connects;
-    } catch {
-      return null;
-    }
+    await pause('short');
   }
 
   async runApplicationLoop() {
     const keywords = getSearchKeywords();
-    this.log(`Search targets: ${keywords.join(', ')}`);
+    this.log(`Searching: ${keywords.join(', ')}`);
 
-    const allJobs = [];
+    let totalApplied = 0;
 
     for (const keyword of keywords) {
       if (this.stopped) break;
+      if (!this.hasConnectsLeft()) {
+        await this.stopNoConnects();
+        return;
+      }
 
       for (let pageNum = 1; pageNum <= MAX_PAGES; pageNum++) {
         if (this.stopped) break;
-
-        const connects = await this.readConnects();
-        if (!this.hasConnectsLeft(connects)) {
+        if (!this.hasConnectsLeft()) {
           await this.stopNoConnects();
           return;
         }
@@ -238,127 +232,156 @@ export class JobApplicationAgent {
         const pageUrl = buildSearchUrl(keyword, pageNum);
         this.updateStatus({
           state: 'searching',
-          currentAction: `Searching "${keyword}" — page ${pageNum}`,
+          currentAction: `Searching "${keyword}" page ${pageNum}`,
           currentSearch: keyword,
         });
-        this.log(`Searching [${keyword}] page ${pageNum}`);
+        this.log(`Opening search: ${pageUrl}`);
 
-        await this.page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-        await this.wait('page_read');
-        await humanScroll(this.page);
+        await this.page.goto(pageUrl, { waitUntil: 'networkidle', timeout: 60000 });
+        await pause('page_load');
+
+        // Stay on search page — do NOT navigate to v2 dashboard
+        const currentUrl = this.page.url();
+        if (currentUrl.includes('v2.onlinejobs.ph/jobseekers') && !currentUrl.includes('jobsearch')) {
+          this.log('Redirected to dashboard — going back to search', { level: 'warn' });
+          await this.page.goto(pageUrl, { waitUntil: 'networkidle', timeout: 60000 });
+          await pause('short');
+        }
 
         const jobs = await this.collectJobLinks(keyword);
+        this.log(`Found ${jobs.length} jobs on page ${pageNum}`);
+
         if (jobs.length === 0) break;
-        allJobs.push(...jobs);
-        await this.wait('medium');
-      }
-    }
 
-    const unique = new Map();
-    for (const job of allJobs) {
-      if (!unique.has(job.id)) unique.set(job.id, job);
-    }
+        for (const job of jobs) {
+          if (this.stopped) break;
+          if (!this.hasConnectsLeft()) {
+            await this.stopNoConnects();
+            return;
+          }
+          if (isJobApplied(job.id)) {
+            this.log(`Skip: ${job.title}`, { jobTitle: job.title });
+            continue;
+          }
 
-    const sorted = [...unique.values()].sort((a, b) => b.postedScore - a.postedScore);
-    this.log(`Found ${sorted.length} unique jobs — prioritizing today's postings first`);
+          try {
+            if (await this.applyToJob(job)) {
+              totalApplied++;
+              this.updateStatus({ jobsAppliedToday: getTodayStats().jobs_applied });
+              this.emit('applied', null);
+            }
+          } catch (err) {
+            this.log(`Failed: ${job.title} — ${err.message}`, { level: 'error', jobTitle: job.title, jobUrl: job.url });
+          }
 
-    let applied = 0;
-    for (const job of sorted) {
-      if (this.stopped) break;
-
-      const connectsNow = await this.readConnects();
-      if (!this.hasConnectsLeft(connectsNow)) {
-        await this.stopNoConnects();
-        return;
-      }
-
-      if (isJobApplied(job.id)) {
-        this.log(`Skip (already applied): ${job.title}`, { jobTitle: job.title, jobUrl: job.url });
-        continue;
-      }
-
-      try {
-        if (await this.applyToJob(job)) {
-          applied++;
-          const stats = getTodayStats();
-          this.updateStatus({ jobsAppliedToday: stats.jobs_applied });
-          this.emit('applied', null);
+          await pause('between_jobs');
         }
-      } catch (err) {
-        this.log(`Failed: ${job.title} — ${err.message}`, { level: 'error', jobTitle: job.title, jobUrl: job.url });
       }
-
-      await this.wait('between_jobs');
     }
 
-    this.log(`Session complete — applied to ${applied} jobs`);
+    this.log(`Done — applied to ${totalApplied} jobs this session`);
   }
 
   async collectJobLinks(keyword) {
     const links = await this.page.evaluate(() => {
       const results = [];
       const seen = new Set();
-      for (const a of document.querySelectorAll('a[href*="/jobseekers/job/"]')) {
-        const match = a.href.match(/\/jobseekers\/job\/([^/?#]+)/);
+
+      // Job cards: title links to /jobseekers/job/slug-id
+      const anchors = document.querySelectorAll('a[href*="/jobseekers/job/"]');
+
+      for (const a of anchors) {
+        const href = a.href || a.getAttribute('href') || '';
+        const fullUrl = href.startsWith('http') ? href : `https://www.onlinejobs.ph${href}`;
+        const match = fullUrl.match(/\/jobseekers\/job\/([^/?#]+)/);
         if (!match || seen.has(match[1])) continue;
+
+        const title = a.textContent?.trim() || '';
+        // Skip short/non-title links (nav, breadcrumbs)
+        if (title.length < 10) continue;
+        // Skip if looks like a button not a title
+        if (/^(apply|bookmark|see more|back)/i.test(title)) continue;
+
         seen.add(match[1]);
-        const parent = a.closest('div, li, article, tr') || a.parentElement;
-        const contextText = parent?.textContent || '';
-        const title =
-          a.querySelector('h4, h3, h2')?.textContent?.trim() ||
-          a.textContent?.trim() ||
-          match[1].replace(/-/g, ' ');
-        if (title.length < 3) continue;
-        results.push({ id: match[1], url: a.href.split('?')[0], title, contextText });
+
+        const card = a.closest('div[class], article, li, section') || a.parentElement?.parentElement;
+        const contextText = card?.textContent || a.textContent || '';
+
+        results.push({
+          id: match[1],
+          url: fullUrl.split('?')[0],
+          title,
+          contextText,
+        });
       }
-      return results;
+
+      // Deduplicate by keeping longest title per id
+      const byId = {};
+      for (const r of results) {
+        if (!byId[r.id] || r.title.length > byId[r.id].title.length) {
+          byId[r.id] = r;
+        }
+      }
+      return Object.values(byId);
     });
 
-    return links.map((job) => {
-      const posted = parsePostedDate(job.contextText);
-      return { ...job, searchKeyword: keyword, postedScore: posted.score, postedLabel: posted.label };
-    });
+    return links
+      .map((job) => {
+        const posted = parsePostedDate(job.contextText);
+        return { ...job, searchKeyword: keyword, postedScore: posted.score, postedLabel: posted.label };
+      })
+      .sort((a, b) => b.postedScore - a.postedScore);
   }
 
   async applyToJob(job) {
     this.updateStatus({
       state: 'applying',
-      currentAction: `Reading: ${job.title} [${job.postedLabel}]`,
+      currentAction: `Opening job: ${job.title}`,
       currentJob: { title: job.title, url: job.url },
       currentSearch: job.searchKeyword,
     });
-    this.log(`Opening [${job.postedLabel}] ${job.title}`, { jobTitle: job.title, jobUrl: job.url });
+    this.log(`Clicking job [${job.postedLabel}]: ${job.title}`, { jobTitle: job.title, jobUrl: job.url });
 
-    await this.page.goto(job.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await this.wait('page_read');
-    await humanScroll(this.page);
-    await this.wait('medium');
+    // Open job detail page on www.onlinejobs.ph
+    await this.page.goto(job.url, { waitUntil: 'networkidle', timeout: 60000 });
+    await pause('page_load');
+
+    if (this.page.url().includes('v2.onlinejobs.ph/jobseekers') && !this.page.url().includes('/job/')) {
+      throw new Error('Redirected away from job page — session issue');
+    }
 
     const jobDetails = await this.page.evaluate(() => {
-      const title = document.querySelector('h1, .job-title, [class*="job-title"]')?.textContent?.trim() || '';
+      const title =
+        document.querySelector('h1')?.textContent?.trim() ||
+        document.querySelector('.job-title, [class*="job-title"]')?.textContent?.trim() || '';
       const company =
         document.querySelector('[class*="company"], .employer-name, a[href*="/employer/"]')?.textContent?.trim() || '';
       const description =
-        document.querySelector('.job-description, [class*="job-description"], [class*="description"], article')
-          ?.textContent?.trim() || document.body.innerText.slice(0, 5000);
-      return { title, company, description, pageText: document.body.innerText.slice(0, 3000) };
+        document.querySelector(
+          '[class*="job-description"], [class*="description"], #job-description, .job-overview, article'
+        )?.textContent?.trim() || document.body.innerText.slice(0, 5000);
+      return { title, company, description, pageText: document.body.innerText.slice(0, 4000) };
     });
 
-    const posted = parsePostedDate(jobDetails.pageText);
     const jobTitle = jobDetails.title || job.title;
+    const posted = parsePostedDate(jobDetails.pageText || job.contextText);
 
-    this.updateStatus({ currentAction: `Writing winning application for: ${jobTitle}` });
+    this.updateStatus({ currentAction: `Writing application for: ${jobTitle}` });
     const { subject, body, mode } = await generateTailoredMessage({
       jobTitle,
       jobDescription: jobDetails.description,
       companyName: jobDetails.company,
     });
     this.log(`Message ready (${mode})`, { jobTitle, jobUrl: job.url });
-    await this.wait('form_field');
 
-    if (!(await this.clickApplyButton())) throw new Error('Apply button not found');
+    // Click green "APPLY FOR THIS JOB" button
+    this.updateStatus({ currentAction: 'Clicking Apply For This Job' });
+    const applied = await this.clickApplyButton();
+    if (!applied) throw new Error('Apply For This Job button not found');
 
-    await this.wait('page_read');
+    await this.page.waitForURL(/\/apply/i, { timeout: 15000 }).catch(() => {});
+    await pause('short');
+
     await this.fillApplicationForm({ subject, body });
     await this.submitApplication();
 
@@ -384,24 +407,26 @@ export class JobApplicationAgent {
       posted_label: posted.label,
       applied_at: new Date().toISOString(),
     });
-    this.log(`Applied successfully: ${jobTitle}`, { jobTitle, jobUrl: job.url });
-    await this.wait('after_submit');
+    this.log(`Applied: ${jobTitle}`, { jobTitle, jobUrl: job.url });
     return true;
   }
 
   async clickApplyButton() {
     const selectors = [
+      'a:has-text("APPLY FOR THIS JOB")',
+      'button:has-text("APPLY FOR THIS JOB")',
       'a:has-text("Apply for this job")',
       'button:has-text("Apply for this job")',
+      'a:has-text("Apply For This Job")',
+      'button:has-text("Apply For This Job")',
       'a:has-text("Apply Now")',
-      'button:has-text("Apply Now")',
       'a[href*="/apply"]',
     ];
+
     for (const sel of selectors) {
       const el = this.page.locator(sel).first();
       if (await el.isVisible({ timeout: 3000 }).catch(() => false)) {
-        await this.wait('before_click');
-        await humanClick(this.page, el);
+        await fastClick(el);
         return true;
       }
     }
@@ -409,56 +434,77 @@ export class JobApplicationAgent {
   }
 
   async fillApplicationForm({ subject, body }) {
-    this.updateStatus({ currentAction: 'Typing application (human speed)' });
+    this.updateStatus({ currentAction: 'Filling application form' });
     await this.page.waitForLoadState('domcontentloaded');
-    await this.wait('form_field');
 
-    for (const sel of ['input[name="subject"]', 'input#subject', 'input[placeholder*="subject" i]']) {
-      const el = this.page.locator(sel).first();
-      if (await el.isVisible({ timeout: 2000 }).catch(() => false)) {
-        await humanType(this.page, el, subject);
-        await this.wait('form_field');
-        break;
-      }
-    }
+    // Read apply points from form page
+    await this.readConnectsFromCurrentPage();
 
-    for (const sel of ['textarea[name="message"]', 'textarea#message', 'textarea']) {
-      const el = this.page.locator(sel).first();
-      if (await el.isVisible({ timeout: 2000 }).catch(() => false)) {
-        await humanType(this.page, el, body);
-        await this.wait('form_field');
-        break;
-      }
-    }
-
-    for (const field of [
-      { sels: ['input[name="name"]', 'input#name'], val: 'Applicant' },
-      { sels: ['input[name="phone"]', 'input[type="tel"]'], val: 'N/A' },
+    // Subject
+    for (const sel of [
+      'input[name="subject"]',
+      'input#subject',
+      'label:has-text("Subject") + input',
+      'input[placeholder*="subject" i]',
     ]) {
-      for (const sel of field.sels) {
-        const el = this.page.locator(sel).first();
-        if (await el.isVisible({ timeout: 800 }).catch(() => false)) {
-          const cur = await el.inputValue().catch(() => '');
-          if (!cur?.trim()) await humanType(this.page, el, field.val);
-          break;
-        }
+      const el = this.page.locator(sel).first();
+      if (await el.isVisible({ timeout: 2000 }).catch(() => false)) {
+        await fastFill(el, subject);
+        break;
+      }
+    }
+
+    // Message
+    for (const sel of [
+      'textarea[name="message"]',
+      'textarea#message',
+      'textarea[name="body"]',
+      'label:has-text("Message") + textarea',
+      'textarea',
+    ]) {
+      const el = this.page.locator(sel).first();
+      if (await el.isVisible({ timeout: 2000 }).catch(() => false)) {
+        await fastFill(el, body);
+        break;
+      }
+    }
+
+    // Contact info — only fill if empty (site often pre-fills email)
+    for (const sel of ['textarea[name="contact"]', 'textarea#contact', 'label:has-text("Contact") + textarea']) {
+      const el = this.page.locator(sel).first();
+      if (await el.isVisible({ timeout: 1000 }).catch(() => false)) {
+        const cur = await el.inputValue().catch(() => '');
+        if (!cur?.trim()) await fastFill(el, process.env.OJ_EMAIL || 'contact@email.com');
+        break;
       }
     }
   }
 
   async submitApplication() {
-    this.updateStatus({ currentAction: 'Sending application...' });
-    await this.wait('medium');
+    this.updateStatus({ currentAction: 'Clicking Send Email' });
 
-    for (const sel of ['button:has-text("Send Email")', 'input[value*="Send Email" i]', 'button[type="submit"]']) {
+    const selectors = [
+      'button:has-text("SEND EMAIL")',
+      'input[value*="SEND EMAIL" i]',
+      'button:has-text("Send Email")',
+      'input[value*="Send Email" i]',
+      'button:has-text("Send")',
+      'button[type="submit"]',
+    ];
+
+    for (const sel of selectors) {
       const el = this.page.locator(sel).first();
       if (await el.isVisible({ timeout: 3000 }).catch(() => false)) {
-        await this.wait('before_click');
         await Promise.all([
-          this.page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {}),
-          humanClick(this.page, el),
+          this.page.waitForNavigation({ waitUntil: 'networkidle', timeout: 30000 }).catch(() => {}),
+          fastClick(el),
         ]);
-        await this.readConnects();
+        await pause('short');
+        await this.readConnectsFromCurrentPage();
+
+        if (this.connectsRemaining !== null && this.connectsRemaining <= MIN_CONNECTS_RESERVE) {
+          await this.stopNoConnects();
+        }
         return;
       }
     }
