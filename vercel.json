@@ -1,10 +1,11 @@
 {
-  "$comment": "Vercel cannot run Playwright/browser automation 24/7. Use Railway or Render for the full agent. This config redirects visitors to your Railway URL.",
-  "redirects": [
-    {
-      "source": "/(.*)",
-      "destination": "https://YOUR-RAILWAY-URL.up.railway.app/$1",
-      "permanent": false
-    }
+  "version": 2,
+  "name": "jobflow-agent",
+  "builds": [
+    { "src": "public/**", "use": "@vercel/static" }
+  ],
+  "routes": [
+    { "handle": "filesystem" },
+    { "src": "/(.*)", "dest": "/public/index.html" }
   ]
 }
