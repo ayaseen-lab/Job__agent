@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>JobFlow Agent — OnlineJobs.ph</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-icon">JF</div>
+        <div>
+          <h1>JobFlow</h1>
+          <p>OnlineJobs Agent</p>
+        </div>
+      </div>
+
+      <nav class="nav">
+        <button class="nav-btn active" data-tab="dashboard">Dashboard</button>
+        <button class="nav-btn" data-tab="history">Application History</button>
+        <button class="nav-btn" data-tab="activity">Live Activity</button>
+      </nav>
+
+      <div class="sidebar-status">
+        <div class="status-row">
+          <span class="status-dot" id="statusDot"></span>
+          <span id="statusLabel">Idle</span>
+        </div>
+        <div class="resume-timer" id="resumeTimer" hidden>
+          <span class="timer-label">Auto-resume in</span>
+          <span class="timer-value" id="timerValue">--:--:--</span>
+        </div>
+      </div>
+
+      <div class="search-tags" id="searchTags"></div>
+    </aside>
+
+    <main class="content">
+      <!-- Dashboard Tab -->
+      <section class="tab-panel active" id="tab-dashboard">
+        <header class="page-header">
+          <div>
+            <h2>Dashboard</h2>
+            <p class="page-sub">Automated job applications on OnlineJobs.ph</p>
+          </div>
+          <div class="controls">
+            <button class="btn btn-start" id="btnStart">▶ Start Agent</button>
+            <button class="btn btn-stop" id="btnStop" disabled>■ Stop</button>
+            <button class="btn btn-reset" id="btnReset">↻ Reset Lock</button>
+          </div>
+        </header>
+
+        <div class="stats-row">
+          <div class="stat-card accent">
+            <span class="stat-label">Connects Left</span>
+            <span class="stat-num" id="connectsValue">—</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">Applied Today</span>
+            <span class="stat-num green" id="appliedToday">0</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">Total Applied</span>
+            <span class="stat-num" id="totalApplied">0</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">Today's Jobs Hit</span>
+            <span class="stat-num orange" id="todayJobsHit">0</span>
+          </div>
+        </div>
+
+        <div class="action-banner" id="actionBanner">
+          <span class="action-label">CURRENT ACTION</span>
+          <span class="action-text" id="currentAction">Ready to start</span>
+        </div>
+
+        <div class="current-job-card" id="currentJobCard" hidden>
+          <div class="cj-label">Processing Now</div>
+          <a class="cj-title" id="currentJobLink" href="#" target="_blank"></a>
+          <span class="cj-search" id="currentSearch"></span>
+        </div>
+
+        <div class="charts-row">
+          <div class="chart-card">
+            <h3>Applications — Last 7 Days</h3>
+            <canvas id="chartDaily"></canvas>
+          </div>
+          <div class="chart-card">
+            <h3>By Search Keyword</h3>
+            <canvas id="chartKeywords"></canvas>
+          </div>
+        </div>
+      </section>
+
+      <!-- History Tab -->
+      <section class="tab-panel" id="tab-history">
+        <header class="page-header">
+          <div>
+            <h2>Application History</h2>
+            <p class="page-sub">All jobs applied with subject, message & description</p>
+          </div>
+          <span class="count-pill" id="historyCount">0 applications</span>
+        </header>
+        <div class="history-list" id="historyList">
+          <div class="empty">No applications yet — start the agent to begin</div>
+        </div>
+      </section>
+
+      <!-- Activity Tab -->
+      <section class="tab-panel" id="tab-activity">
+        <header class="page-header">
+          <div>
+            <h2>Live Activity</h2>
+            <p class="page-sub">Real-time agent log stream</p>
+          </div>
+          <span class="live-pill">● LIVE</span>
+        </header>
+        <div class="log-feed" id="logFeed"></div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

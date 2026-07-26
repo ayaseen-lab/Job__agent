@@ -1,0 +1,10 @@
+{
+  "$comment": "Vercel cannot run Playwright/browser automation 24/7. Use Railway or Render for the full agent. This config redirects visitors to your Railway URL.",
+  "redirects": [
+    {
+      "source": "/(.*)",
+      "destination": "https://YOUR-RAILWAY-URL.up.railway.app/$1",
+      "permanent": false
+    }
+  ]
+}

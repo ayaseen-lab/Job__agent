@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: jobflow-agent
+    runtime: docker
+    plan: starter
+    healthCheckPath: /api/status
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: HEADLESS
+        value: true
+      - key: OJ_EMAIL
+        sync: false
+      - key: OJ_PASSWORD
+        sync: false
+      - key: JOB_KEYWORDS
+        value: React,Software Engineer,AI Engineer,Backend Developer
+    disk:
+      name: jobflow-data
+      mountPath: /app/data
+      sizeGB: 1
