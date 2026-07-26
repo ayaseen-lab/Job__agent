@@ -1,4 +1,5 @@
-const socket = io();
+const API_BASE = window.JOBFLOW_CONFIG?.API_URL || '';
+const socket = io(API_BASE || undefined, { transports: ['websocket', 'polling'] });
 const $ = (id) => document.getElementById(id);
 
 let dailyChart = null;
@@ -198,30 +199,30 @@ socket.on('logs', (logs) => {
 socket.on('applied', renderHistory);
 socket.on('analytics', renderCharts);
 socket.on('application', () => {
-  fetch('/api/applied').then((r) => r.json()).then(renderHistory);
-  fetch('/api/analytics').then((r) => r.json()).then(renderCharts);
+  fetch(`${API_BASE}/api/applied`).then((r) => r.json()).then(renderHistory);
+  fetch(`${API_BASE}/api/analytics`).then((r) => r.json()).then(renderCharts);
 });
 
 $('btnStart').addEventListener('click', async () => {
   $('btnStart').disabled = true;
-  const res = await fetch('/api/start', { method: 'POST' });
+  const res = await fetch(`${API_BASE}/api/start`, { method: 'POST' });
   if (!res.ok) {
     const d = await res.json();
     addLog({ timestamp: new Date().toISOString(), level: 'error', message: d.error });
     $('btnStart').disabled = false;
   }
 });
-$('btnStop').addEventListener('click', () => fetch('/api/stop', { method: 'POST' }));
+$('btnStop').addEventListener('click', () => fetch(`${API_BASE}/api/stop`, { method: 'POST' }));
 $('btnReset').addEventListener('click', async () => {
-  await fetch('/api/reset-daily', { method: 'POST' });
+  await fetch(`${API_BASE}/api/reset-daily`, { method: 'POST' });
   addLog({ timestamp: new Date().toISOString(), level: 'info', message: 'Daily lock cleared' });
 });
 
 Promise.all([
-  fetch('/api/status').then((r) => r.json()),
-  fetch('/api/logs').then((r) => r.json()),
-  fetch('/api/applied').then((r) => r.json()),
-  fetch('/api/analytics').then((r) => r.json()),
+  fetch(`${API_BASE}/api/status`).then((r) => r.json()),
+  fetch(`${API_BASE}/api/logs`).then((r) => r.json()),
+  fetch(`${API_BASE}/api/applied`).then((r) => r.json()),
+  fetch(`${API_BASE}/api/analytics`).then((r) => r.json()),
 ]).then(([status, logs, applied, analytics]) => {
   updateUI(status);
   if (!logs.length) $('logFeed').innerHTML = '<div class="empty">Waiting for activity...</div>';

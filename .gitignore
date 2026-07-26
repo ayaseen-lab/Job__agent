@@ -4,3 +4,4 @@ data/
 .playwright/
 *.log
 .DS_Store
+.vercel

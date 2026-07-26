@@ -47,9 +47,21 @@ In Railway → your service → **Volumes** → Add volume:
 
 ---
 
-## Option 3: Vercel (redirect only)
+### Step 4: Connect Vercel dashboard to Railway backend
 
-If you want a `vercel.app` domain, edit `vercel.json` and replace `YOUR-RAILWAY-URL` with your Railway domain. Vercel will redirect visitors to the real agent.
+Edit `public/config.js` in GitHub (or locally) and set:
+```javascript
+window.JOBFLOW_CONFIG = { API_URL: 'https://YOUR-RAILWAY-URL.up.railway.app' };
+```
+Push to GitHub — Vercel auto-redeploys. Now https://onlineph.vercel.app controls your 24/7 cloud agent.
+
+---
+
+## Option 3: Vercel (dashboard UI only)
+
+If you want a `vercel.app` domain, edit `public/config.js` with your Railway URL and push. Vercel auto-deploys from GitHub.
+
+Live dashboard: **https://onlineph.vercel.app** (needs Railway backend URL in config.js)
 
 ```bash
 npx vercel --prod
