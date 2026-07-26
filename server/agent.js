@@ -186,26 +186,51 @@ export class JobApplicationAgent {
     const password = process.env.OJ_PASSWORD;
     if (!email || !password) throw new Error('OJ_EMAIL and OJ_PASSWORD must be set in .env');
 
-    this.updateStatus({ state: 'logging_in', currentAction: 'Logging in' });
-    await this.page.goto(LOGIN_URL, { waitUntil: 'networkidle', timeout: 60000 });
+    this.updateStatus({ state: 'logging_in', currentAction: 'Logging in to OnlineJobs.ph' });
+    this.log('Opening login page');
 
-    const emailInput = this.page.locator('input[type="email"], input[name="email"], input#email').first();
-    const passwordInput = this.page.locator('input[type="password"], input[name="password"]').first();
+    await this.page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await this.page.waitForTimeout(2000);
 
-    await emailInput.waitFor({ state: 'visible', timeout: 15000 });
+    const emailInput = this.page.locator('input[name="email"]');
+    const passwordInput = this.page.locator('input[name="password"]');
+
+    await emailInput.waitFor({ state: 'visible', timeout: 20000 });
+    this.log('Filling email');
+    await emailInput.click();
     await emailInput.fill(email);
+
+    await passwordInput.waitFor({ state: 'visible', timeout: 10000 });
+    this.log('Filling password');
+    await passwordInput.click();
     await passwordInput.fill(password);
 
-    await Promise.all([
-      this.page.waitForNavigation({ waitUntil: 'networkidle', timeout: 60000 }).catch(() => {}),
-      this.page.locator('button[type="submit"], button:has-text("Log in"), button:has-text("Login")').first().click(),
-    ]);
+    const filled = await this.page.evaluate(() => ({
+      email: document.querySelector('input[name="email"]')?.value || '',
+      hasPassword: !!(document.querySelector('input[name="password"]')?.value),
+    }));
 
-    if (this.page.url().includes('/login')) {
-      throw new Error('Login failed — check credentials');
+    if (!filled.email || !filled.hasPassword) {
+      throw new Error('Login form fields not filled — page may not have loaded');
     }
 
-    this.log('Login successful');
+    this.log('Clicking Log in button');
+    const loginBtn = this.page.locator('button[type="submit"]:has-text("Log in")');
+
+    await Promise.all([
+      this.page.waitForURL((url) => !url.href.includes('/login'), { timeout: 30000 }),
+      loginBtn.click(),
+    ]).catch(async () => {
+      // fallback: click again
+      await loginBtn.click();
+      await this.page.waitForTimeout(3000);
+    });
+
+    if (this.page.url().includes('/login')) {
+      throw new Error('Login failed — still on login page. Check credentials.');
+    }
+
+    this.log(`Login successful → ${this.page.url()}`);
     await pause('short');
   }
 
@@ -237,14 +262,14 @@ export class JobApplicationAgent {
         });
         this.log(`Opening search: ${pageUrl}`);
 
-        await this.page.goto(pageUrl, { waitUntil: 'networkidle', timeout: 60000 });
-        await pause('page_load');
+        await this.page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await this.page.waitForTimeout(2000);
 
         // Stay on search page — do NOT navigate to v2 dashboard
         const currentUrl = this.page.url();
         if (currentUrl.includes('v2.onlinejobs.ph/jobseekers') && !currentUrl.includes('jobsearch')) {
           this.log('Redirected to dashboard — going back to search', { level: 'warn' });
-          await this.page.goto(pageUrl, { waitUntil: 'networkidle', timeout: 60000 });
+          await this.page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
           await pause('short');
         }
 
@@ -343,8 +368,8 @@ export class JobApplicationAgent {
     this.log(`Clicking job [${job.postedLabel}]: ${job.title}`, { jobTitle: job.title, jobUrl: job.url });
 
     // Open job detail page on www.onlinejobs.ph
-    await this.page.goto(job.url, { waitUntil: 'networkidle', timeout: 60000 });
-    await pause('page_load');
+    await this.page.goto(job.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await this.page.waitForTimeout(2000);
 
     if (this.page.url().includes('v2.onlinejobs.ph/jobseekers') && !this.page.url().includes('/job/')) {
       throw new Error('Redirected away from job page — session issue');
@@ -496,7 +521,7 @@ export class JobApplicationAgent {
       const el = this.page.locator(sel).first();
       if (await el.isVisible({ timeout: 3000 }).catch(() => false)) {
         await Promise.all([
-          this.page.waitForNavigation({ waitUntil: 'networkidle', timeout: 30000 }).catch(() => {}),
+          this.page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {}),
           fastClick(el),
         ]);
         await pause('short');
