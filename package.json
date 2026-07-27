@@ -9,7 +9,6 @@
   "scripts": {
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
-    "postinstall": "npx playwright install chromium || true",
     "install-browser": "npx playwright install chromium",
     "docker:build": "docker build -t jobflow-agent .",
     "docker:run": "docker run -p 3847:3847 --env-file .env -v jobflow-data:/app/data jobflow-agent"
@@ -18,8 +17,7 @@
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "node-cron": "^3.0.3",
-    "playwright": "1.62.0",
-    "playwright-core": "1.62.0",
+    "playwright": "1.49.1",
     "socket.io": "^4.8.1"
   }
 }
