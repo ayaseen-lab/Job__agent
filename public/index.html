@@ -20,12 +20,6 @@
         </div>
       </div>
 
-      <nav class="nav">
-        <button class="nav-btn active" data-tab="dashboard">Dashboard</button>
-        <button class="nav-btn" data-tab="history">Application History</button>
-        <button class="nav-btn" data-tab="activity">Live Activity</button>
-      </nav>
-
       <div class="sidebar-status">
         <div class="status-row">
           <span class="status-dot" id="statusDot"></span>
@@ -41,92 +35,91 @@
     </aside>
 
     <main class="content">
-      <!-- Dashboard Tab -->
-      <section class="tab-panel active" id="tab-dashboard">
-        <header class="page-header">
-          <div>
-            <h2>Dashboard</h2>
-            <p class="page-sub">Automated job applications on OnlineJobs.ph</p>
-          </div>
-          <div class="controls">
-            <button class="btn btn-start" id="btnStart">▶ Start Agent</button>
-            <button class="btn btn-stop" id="btnStop" disabled>■ Stop</button>
-            <button class="btn btn-reset" id="btnReset">↻ Reset Lock</button>
-          </div>
-        </header>
-
-        <div class="stats-row">
-          <div class="stat-card accent">
-            <span class="stat-label">Connects Left</span>
-            <span class="stat-num" id="connectsValue">—</span>
-          </div>
-          <div class="stat-card">
-            <span class="stat-label">Applied Today</span>
-            <span class="stat-num green" id="appliedToday">0</span>
-          </div>
-          <div class="stat-card">
-            <span class="stat-label">Total Applied</span>
-            <span class="stat-num" id="totalApplied">0</span>
-          </div>
-          <div class="stat-card">
-            <span class="stat-label">Today's Jobs Hit</span>
-            <span class="stat-num orange" id="todayJobsHit">0</span>
-          </div>
+      <header class="page-header">
+        <div>
+          <h2>Dashboard</h2>
+          <p class="page-sub">Automated job applications on OnlineJobs.ph</p>
         </div>
-
-        <div class="action-banner" id="actionBanner">
-          <span class="action-label">CURRENT ACTION</span>
-          <span class="action-text" id="currentAction">Ready to start</span>
+        <div class="controls">
+          <button class="btn btn-start" id="btnStart">▶ Start Agent</button>
+          <button class="btn btn-stop" id="btnStop" disabled>■ Stop</button>
+          <button class="btn btn-reset" id="btnReset">↻ Reset Lock</button>
         </div>
+      </header>
 
-        <div class="current-job-card" id="currentJobCard" hidden>
-          <div class="cj-label">Processing Now</div>
-          <a class="cj-title" id="currentJobLink" href="#" target="_blank"></a>
-          <span class="cj-search" id="currentSearch"></span>
+      <div class="stats-row">
+        <div class="stat-card accent">
+          <span class="stat-label">Connects Left</span>
+          <span class="stat-num" id="connectsValue">—</span>
         </div>
-
-        <div class="charts-row">
-          <div class="chart-card">
-            <h3>Applications — Last 7 Days</h3>
-            <canvas id="chartDaily"></canvas>
-          </div>
-          <div class="chart-card">
-            <h3>By Search Keyword</h3>
-            <canvas id="chartKeywords"></canvas>
-          </div>
+        <div class="stat-card">
+          <span class="stat-label">Applied Today</span>
+          <span class="stat-num green" id="appliedToday">0</span>
         </div>
-      </section>
-
-      <!-- History Tab -->
-      <section class="tab-panel" id="tab-history">
-        <header class="page-header">
-          <div>
-            <h2>Application History</h2>
-            <p class="page-sub">All jobs applied with subject, message & description</p>
-          </div>
-          <span class="count-pill" id="historyCount">0 applications</span>
-        </header>
-        <div class="history-list" id="historyList">
-          <div class="empty">No applications yet — start the agent to begin</div>
+        <div class="stat-card">
+          <span class="stat-label">Total Applied</span>
+          <span class="stat-num" id="totalApplied">0</span>
         </div>
-      </section>
+        <div class="stat-card">
+          <span class="stat-label">Today's Jobs Hit</span>
+          <span class="stat-num orange" id="todayJobsHit">0</span>
+        </div>
+      </div>
 
-      <!-- Activity Tab -->
-      <section class="tab-panel" id="tab-activity">
-        <header class="page-header">
-          <div>
-            <h2>Live Activity</h2>
-            <p class="page-sub">Real-time agent log stream</p>
+      <div class="action-banner">
+        <span class="action-label">CURRENT ACTION</span>
+        <span class="action-text" id="currentAction">Ready to start</span>
+      </div>
+
+      <div class="current-job-card" id="currentJobCard" hidden>
+        <div class="cj-label">Processing Now</div>
+        <a class="cj-title" id="currentJobLink" href="#" target="_blank"></a>
+        <span class="cj-search" id="currentSearch"></span>
+      </div>
+
+      <div class="charts-row">
+        <div class="chart-card">
+          <h3>Applications — Last 7 Days</h3>
+          <canvas id="chartDaily"></canvas>
+        </div>
+        <div class="chart-card">
+          <h3>By Search Keyword</h3>
+          <canvas id="chartKeywords"></canvas>
+        </div>
+      </div>
+
+      <div class="home-panels">
+        <section class="panel-section history-panel">
+          <div class="section-header">
+            <div>
+              <h3>Application History</h3>
+              <p class="section-sub">All applied jobs with subject, message & description</p>
+            </div>
+            <span class="count-pill" id="historyCount">0 applications</span>
           </div>
-          <span class="live-pill">● LIVE</span>
-        </header>
-        <div class="log-feed" id="logFeed"></div>
-      </section>
+          <div class="history-list" id="historyList">
+            <div class="empty">No applications yet — start the agent to begin</div>
+          </div>
+        </section>
+
+        <section class="panel-section activity-panel">
+          <div class="section-header">
+            <div>
+              <h3>Live Activity</h3>
+              <p class="section-sub">Real-time agent log</p>
+            </div>
+            <span class="live-pill">● LIVE</span>
+          </div>
+          <div class="log-feed" id="logFeed">
+            <div class="empty">Waiting for activity...</div>
+          </div>
+        </section>
+      </div>
     </main>
   </div>
 
   <script src="config.js"></script>
-  <script src="/socket.io/socket.io.js"></script>
+  <script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
