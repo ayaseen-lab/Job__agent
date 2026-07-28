@@ -36,12 +36,145 @@ function titleFromSlug(slug) {
     .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+const DESCRIPTION_TITLE_PATTERNS = [
+  /\b(we are|we're|looking for|seeking|hiring|join our|must have|responsible for|requirements|qualifications|experience in|years of experience)\b/i,
+  /posted on|per month|\$\d|PHP/i,
+];
+
+function looksLikeDescription(text) {
+  const t = (text || '').trim();
+  if (!t) return true;
+  if (t.length > 80) return true;
+  if (DESCRIPTION_TITLE_PATTERNS.some((re) => re.test(t))) return true;
+  if (/[.!?]\s+\w{5,}/.test(t)) return true;
+  if (t.split(',').length >= 3) return true;
+  return false;
+}
+
 function cleanJobTitle(title, slug) {
-  const t = (title || '').trim();
-  if (!t || t.length > 120 || /posted on|per month|\$\d|PHP/i.test(t)) {
-    return titleFromSlug(slug);
+  const slugTitle = titleFromSlug(slug);
+  const t = (title || '').trim().replace(/\s+/g, ' ');
+
+  if (!t || looksLikeDescription(t)) return slugTitle;
+
+  let cleaned = t.split(/\s{2,}|•|—|\||\n/)[0].trim();
+  if (!cleaned || cleaned.length > 80 || looksLikeDescription(cleaned)) return slugTitle;
+
+  return cleaned;
+}
+
+const DEV_KEYWORDS = [
+  'engineer',
+  'developer',
+  'development',
+  'devops',
+  'programmer',
+  'coder',
+  'full stack',
+  'fullstack',
+  'full-stack',
+  'frontend',
+  'front end',
+  'front-end',
+  'backend',
+  'back end',
+  'back-end',
+  'software',
+  'architect',
+  'react',
+  'node',
+  'nodejs',
+  'node.js',
+  'python',
+  'javascript',
+  'typescript',
+  'java',
+  'golang',
+  'rust',
+  'mobile dev',
+  'app dev',
+  'web dev',
+  'dotnet',
+  '.net',
+  'c#',
+  'csharp',
+  'php',
+  'laravel',
+  'django',
+  'flask',
+  'ruby',
+  'rails',
+  'kotlin',
+  'swift',
+  'ai engineer',
+  'ml engineer',
+  'machine learning',
+  'data engineer',
+  'cloud engineer',
+  'platform engineer',
+  'qa engineer',
+  'test engineer',
+  'automation engineer',
+  'embedded',
+  'firmware',
+  'tech lead',
+  'technical lead',
+  'coding',
+  'saas',
+  'supabase',
+  'next.js',
+  'nextjs',
+];
+
+const NON_DEV_ROLES = [
+  'executive assistant',
+  'virtual assistant',
+  'personal assistant',
+  'administrative assistant',
+  'seo specialist',
+  'seo expert',
+  'seo manager',
+  'marketing specialist',
+  'digital marketing',
+  'social media',
+  'content writer',
+  'copywriter',
+  'graphic designer',
+  'video editor',
+  'paid ads',
+  'ppc specialist',
+  'product manager',
+  'project manager',
+  'account manager',
+  'sales representative',
+  'recruiter',
+  'human resources',
+  'customer service',
+  'data entry',
+  'bookkeeper',
+  'accountant',
+  'equity partner',
+  'business partner',
+  'head of rewards',
+  'monetization',
+  'community manager',
+  'transcriptionist',
+  'translator',
+  'office admin',
+];
+
+export function isRelevantDevJob(title) {
+  const lower = (title || '').toLowerCase();
+  const hasDevKeyword = DEV_KEYWORDS.some((kw) => lower.includes(kw));
+  const hasBlockKeyword = NON_DEV_ROLES.some((kw) => lower.includes(kw));
+
+  if (hasBlockKeyword && !hasDevKeyword) {
+    return { relevant: false, reason: `non-dev role blocked: "${title}"` };
   }
-  return t.split(/\s{2,}|•/)[0].trim() || titleFromSlug(slug);
+  if (!hasDevKeyword) {
+    return { relevant: false, reason: `no dev keyword: "${title}"` };
+  }
+  return { relevant: true, reason: null };
 }
 
 export function parsePostedDate(text) {
@@ -488,6 +621,12 @@ export class JobApplicationAgent {
             continue;
           }
 
+          const relevance = isRelevantDevJob(job.title);
+          if (!relevance.relevant) {
+            this.log(`Skip: ${relevance.reason}`, { jobTitle: job.title, jobUrl: job.url });
+            continue;
+          }
+
           try {
             if (await this.applyToJob(job)) {
               totalApplied++;
@@ -511,12 +650,19 @@ export class JobApplicationAgent {
       const results = [];
       const seen = new Set();
 
-      const pickTitle = (a, slug) => {
-        const h = a.querySelector('h4, h3, h2');
-        if (h?.textContent?.trim()) return h.textContent.trim();
-        const t = a.textContent?.trim() || '';
-        if (t.length >= 10 && t.length <= 100 && !/posted on/i.test(t)) return t;
-        return slug.replace(/-\d+$/, '').replace(/-/g, ' ');
+      const slugTitle = (slug) =>
+        slug
+          .replace(/-\d+$/, '')
+          .replace(/-/g, ' ')
+          .replace(/\b\w/g, (c) => c.toUpperCase());
+
+      const pickTitle = (a, slug, card) => {
+        const heading =
+          a.querySelector('h4, h3, h2, h1') ||
+          card?.querySelector('a[href*="/jobseekers/job/"] h4, a[href*="/jobseekers/job/"] h3, h4, h3');
+        const headingText = heading?.textContent?.replace(/\s+/g, ' ').trim();
+        if (headingText && headingText.length <= 100) return headingText;
+        return slugTitle(slug);
       };
 
       for (const a of document.querySelectorAll('a[href*="/jobseekers/job/"]')) {
@@ -524,7 +670,8 @@ export class JobApplicationAgent {
         const fullUrl = href.startsWith('http') ? href : `https://www.onlinejobs.ph${href}`;
         const match = fullUrl.match(/\/jobseekers\/job\/([^/?#]+)/);
         if (!match || seen.has(match[1])) continue;
-        if (/^(apply|bookmark|see more|back)/i.test(a.textContent?.trim() || '')) continue;
+        const linkText = (a.textContent || '').trim();
+        if (/^(apply|bookmark|see more|back)$/i.test(linkText)) continue;
 
         seen.add(match[1]);
         const card = a.closest('div, article, li, section') || a.parentElement?.parentElement;
@@ -532,7 +679,7 @@ export class JobApplicationAgent {
         results.push({
           id: match[1],
           url: fullUrl.split('?')[0],
-          title: pickTitle(a, match[1]),
+          title: pickTitle(a, match[1], card),
           contextText: card?.textContent || '',
         });
       }
@@ -618,6 +765,13 @@ export class JobApplicationAgent {
     });
 
     const jobTitle = cleanJobTitle(jobDetails.title, job.id) || job.title;
+
+    const relevance = isRelevantDevJob(jobTitle);
+    if (!relevance.relevant) {
+      this.log(`Skip: ${relevance.reason}`, { jobTitle, jobUrl: job.url });
+      return false;
+    }
+
     const posted = parsePostedDate(jobDetails.pageText || job.contextText);
 
     this.updateStatus({ currentAction: `Writing application for: ${jobTitle}` });
@@ -793,34 +947,111 @@ export class JobApplicationAgent {
   }
 
   async submitApplication() {
-    this.updateStatus({ currentAction: 'Clicking Send Email' });
+    this.updateStatus({ currentAction: 'Submitting application' });
 
-    const selectors = [
-      'button:has-text("SEND EMAIL")',
-      'input[value*="SEND EMAIL" i]',
-      'button:has-text("Send Email")',
-      'input[value*="Send Email" i]',
-      'button:has-text("Send")',
-      'button[type="submit"]',
-    ];
+    await this.page.waitForLoadState('domcontentloaded');
+    await this.page
+      .locator('textarea[name="message"], textarea#message, textarea[name="body"], input[name="subject"]')
+      .first()
+      .waitFor({ state: 'visible', timeout: 15000 })
+      .catch(() => {});
+    await this.page.waitForTimeout(800);
 
-    for (const sel of selectors) {
-      const el = this.page.locator(sel).first();
-      if (await el.isVisible({ timeout: 3000 }).catch(() => false)) {
-        await Promise.all([
-          this.page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {}),
-          fastClick(el),
-        ]);
-        await pause('short');
-        await this.readConnectsFromCurrentPage();
+    const tryClickSubmit = async () => {
+      const strategies = [
+        () => this.page.getByRole('button', { name: /send\s*email/i }),
+        () => this.page.getByRole('button', { name: /send\s*application/i }),
+        () => this.page.getByRole('button', { name: /^send$/i }),
+        () => this.page.locator('button:has-text("SEND EMAIL")'),
+        () => this.page.locator('button:has-text("Send Email")'),
+        () => this.page.locator('input[value*="SEND EMAIL" i]'),
+        () => this.page.locator('input[value*="Send Email" i]'),
+        () => this.page.locator('input[type="submit"][value*="send" i]'),
+        () => this.page.locator('input[type="submit"][value*="email" i]'),
+        () => this.page.locator('input[type="submit"][value*="application" i]'),
+        () => this.page.locator('.form-group.submit button, .form-group.submit input[type="submit"]'),
+        () => this.page.locator('form button.btn-primary, form input.btn-primary[type="submit"]'),
+        () => this.page.locator('button[type="submit"]'),
+        () => this.page.locator('input[type="submit"]'),
+      ];
 
-        if (this.connectsRemaining !== null && this.connectsRemaining <= MIN_CONNECTS_RESERVE) {
-          await this.stopNoConnects();
+      for (const getLocator of strategies) {
+        try {
+          const el = getLocator().first();
+          if (await el.isVisible({ timeout: 2000 }).catch(() => false)) {
+            await el.scrollIntoViewIfNeeded();
+            await Promise.all([
+              this.page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {}),
+              fastClick(el),
+            ]);
+            return true;
+          }
+        } catch {
+          /* try next */
         }
-        return;
       }
+
+      return this.page.evaluate(() => {
+        const isVisible = (el) => {
+          const rect = el.getBoundingClientRect();
+          const style = window.getComputedStyle(el);
+          return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+        };
+
+        const score = (el) => {
+          const text = `${el.textContent || ''} ${el.value || ''}`.trim().toLowerCase();
+          if (/send\s*email|send\s*application|send\s*message|submit\s*application/.test(text)) return 10;
+          if (text === 'send' || text === 'submit') return 8;
+          if (el.type === 'submit' || el.getAttribute('type') === 'submit') return 5;
+          if (el.classList?.contains('btn-primary')) return 3;
+          return 0;
+        };
+
+        const candidates = [...document.querySelectorAll('button, input[type="submit"], a.btn')];
+        const best = candidates
+          .filter(isVisible)
+          .map((el) => ({ el, s: score(el) }))
+          .filter((x) => x.s > 0)
+          .sort((a, b) => b.s - a.s)[0];
+
+        if (best) {
+          best.el.click();
+          return true;
+        }
+
+        const form =
+          document.querySelector('textarea[name="message"], textarea#message, textarea[name="body"]')?.closest('form');
+        if (form) {
+          form.requestSubmit?.() || form.submit();
+          return true;
+        }
+
+        return false;
+      });
+    };
+
+    const submitted = await tryClickSubmit();
+    if (!submitted) {
+      const debug = await this.page
+        .evaluate(() =>
+          [...document.querySelectorAll('button, input[type="submit"]')]
+            .map((el) => ({
+              tag: el.tagName,
+              type: el.type || '',
+              text: (el.textContent || el.value || '').trim().slice(0, 80),
+            }))
+            .filter((x) => x.text),
+        )
+        .catch(() => []);
+      throw new Error(`Send Email button not found${debug.length ? `: ${JSON.stringify(debug.slice(0, 8))}` : ''}`);
     }
-    throw new Error('Send Email button not found');
+
+    await pause('short');
+    await this.readConnectsFromCurrentPage();
+
+    if (this.connectsRemaining !== null && this.connectsRemaining <= MIN_CONNECTS_RESERVE) {
+      await this.stopNoConnects();
+    }
   }
 
   async cleanup() {
