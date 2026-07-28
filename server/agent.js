@@ -11,7 +11,8 @@ import {
 import { generateTailoredMessage } from './messageGenerator.js';
 import { pause, fastFill, fastClick } from './humanDelay.js';
 
-const LOGIN_URL = 'https://v2.onlinejobs.ph/login';
+const V2_LOGIN_URL = 'https://v2.onlinejobs.ph/login';
+const WWW_LOGIN_URL = 'https://www.onlinejobs.ph/login';
 const BASE_SEARCH = 'https://www.onlinejobs.ph/jobseekers/jobsearch?jobkeyword=';
 const DEFAULT_KEYWORDS = ['React', 'Software Engineer', 'AI Engineer', 'Backend Developer'];
 const MAX_PAGES = Number(process.env.MAX_SEARCH_PAGES) || 3;
@@ -203,13 +204,141 @@ export class JobApplicationAgent {
 
   async launchBrowser() {
     this.log('Launching browser');
-    this.browser = await chromium.launch({ headless: process.env.HEADLESS !== 'false' });
+    this.browser = await chromium.launch({
+      headless: process.env.HEADLESS !== 'false',
+      args: [
+        '--disable-blink-features=AutomationControlled',
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+      ],
+    });
     this.context = await this.browser.newContext({
       viewport: { width: 1280, height: 900 },
       userAgent:
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+      locale: 'en-US',
+      timezoneId: 'Asia/Manila',
     });
     this.page = await this.context.newPage();
+    this.page.setDefaultTimeout(45000);
+  }
+
+  async waitForLoginForm() {
+    const selectors = [
+      'input[name="info[email]"]',
+      'input#login_username',
+      'input[name="email"]',
+      'input[type="email"]',
+      'input[autocomplete="email"]',
+    ];
+
+    for (const sel of selectors) {
+      const el = this.page.locator(sel).first();
+      if (await el.isVisible({ timeout: 8000 }).catch(() => false)) return el;
+    }
+
+    // v2 Next.js login hydrates after initial paint
+    await this.page.waitForTimeout(3000);
+    for (const sel of selectors) {
+      const el = this.page.locator(sel).first();
+      await el.waitFor({ state: 'visible', timeout: 15000 }).catch(() => null);
+      if (await el.isVisible().catch(() => false)) return el;
+    }
+
+    throw new Error('Login form not found — page may be blocked or still loading');
+  }
+
+  async fillLoginForm(email, password) {
+    const emailInput = await this.waitForLoginForm();
+
+    const passwordInput = this.page
+      .locator('input[name="info[password]"], input#login_password, input[name="password"], input[type="password"]')
+      .first();
+
+    await emailInput.click();
+    await emailInput.fill(email);
+    await passwordInput.waitFor({ state: 'visible', timeout: 15000 });
+    await passwordInput.click();
+    await passwordInput.fill(password);
+
+    const filled = await this.page.evaluate(() => {
+      const emailEl =
+        document.querySelector('input[name="info[email]"], input#login_username, input[name="email"], input[type="email"]');
+      const passEl =
+        document.querySelector('input[name="info[password]"], input#login_password, input[name="password"], input[type="password"]');
+      return {
+        email: emailEl?.value || '',
+        hasPassword: !!passEl?.value,
+      };
+    });
+
+    if (!filled.email || !filled.hasPassword) {
+      throw new Error('Login form fields not filled — page may not have loaded');
+    }
+  }
+
+  async submitLoginForm() {
+    const loginBtn = this.page
+      .locator(
+        'button[name="login"], button:has-text("Login"), button:has-text("Log in"), button[type="submit"], input[type="submit"]',
+      )
+      .first();
+
+    await loginBtn.waitFor({ state: 'visible', timeout: 15000 });
+    await Promise.all([
+      this.page.waitForURL((url) => !url.href.includes('/login'), { timeout: 45000 }),
+      loginBtn.click(),
+    ]).catch(async () => {
+      await loginBtn.click();
+      await this.page.waitForTimeout(4000);
+    });
+  }
+
+  async loginOnWww(email, password) {
+    this.log('Opening www login page');
+    await this.page.goto(WWW_LOGIN_URL, { waitUntil: 'load', timeout: 90000 });
+    await this.page.waitForLoadState('domcontentloaded').catch(() => {});
+    await this.page.waitForTimeout(2000);
+
+    if (!this.page.url().includes('/login')) {
+      this.log(`Already logged in on www → ${this.page.url()}`);
+      return true;
+    }
+
+    await this.fillLoginForm(email, password);
+    this.log('Submitting www login');
+    await this.submitLoginForm();
+
+    if (this.page.url().includes('/login')) {
+      return false;
+    }
+
+    this.log(`www login successful → ${this.page.url()}`);
+    return true;
+  }
+
+  async loginOnV2(email, password) {
+    this.log('Opening v2 login page');
+    await this.page.goto(V2_LOGIN_URL, { waitUntil: 'load', timeout: 90000 });
+    await this.page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
+    await this.page.waitForTimeout(3000);
+
+    if (!this.page.url().includes('/login')) {
+      this.log(`Already logged in on v2 → ${this.page.url()}`);
+      return true;
+    }
+
+    await this.fillLoginForm(email, password);
+    this.log('Submitting v2 login');
+    await this.submitLoginForm();
+
+    if (this.page.url().includes('/login')) {
+      return false;
+    }
+
+    this.log(`v2 login successful → ${this.page.url()}`);
+    return true;
   }
 
   async login() {
@@ -218,50 +347,24 @@ export class JobApplicationAgent {
     if (!email || !password) throw new Error('OJ_EMAIL and OJ_PASSWORD must be set in .env');
 
     this.updateStatus({ state: 'logging_in', currentAction: 'Logging in to OnlineJobs.ph' });
-    this.log('Opening login page');
 
-    await this.page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await this.page.waitForTimeout(2000);
-
-    const emailInput = this.page.locator('input[name="email"]');
-    const passwordInput = this.page.locator('input[name="password"]');
-
-    await emailInput.waitFor({ state: 'visible', timeout: 20000 });
-    this.log('Filling email');
-    await emailInput.click();
-    await emailInput.fill(email);
-
-    await passwordInput.waitFor({ state: 'visible', timeout: 10000 });
-    this.log('Filling password');
-    await passwordInput.click();
-    await passwordInput.fill(password);
-
-    const filled = await this.page.evaluate(() => ({
-      email: document.querySelector('input[name="email"]')?.value || '',
-      hasPassword: !!(document.querySelector('input[name="password"]')?.value),
-    }));
-
-    if (!filled.email || !filled.hasPassword) {
-      throw new Error('Login form fields not filled — page may not have loaded');
-    }
-
-    this.log('Clicking Log in button');
-    const loginBtn = this.page.locator('button[type="submit"]:has-text("Log in")');
-
-    await Promise.all([
-      this.page.waitForURL((url) => !url.href.includes('/login'), { timeout: 30000 }),
-      loginBtn.click(),
-    ]).catch(async () => {
-      // fallback: click again
-      await loginBtn.click();
-      await this.page.waitForTimeout(3000);
+    // www login is static HTML and more reliable in headless Docker than v2 Next.js
+    let ok = await this.loginOnWww(email, password).catch((err) => {
+      this.log(`www login attempt failed: ${err.message}`, { level: 'warn' });
+      return false;
     });
 
-    if (this.page.url().includes('/login')) {
-      throw new Error('Login failed — still on login page. Check credentials.');
+    if (!ok) {
+      ok = await this.loginOnV2(email, password).catch((err) => {
+        this.log(`v2 login attempt failed: ${err.message}`, { level: 'warn' });
+        return false;
+      });
     }
 
-    this.log(`Login successful → ${this.page.url()}`);
+    if (!ok) {
+      throw new Error('Login failed on both www and v2 — check credentials or site availability');
+    }
+
     await this.ensureWwwSession(email, password);
     await pause('short');
   }
@@ -289,32 +392,10 @@ export class JobApplicationAgent {
     }
 
     this.log('Logging in on www.onlinejobs.ph');
-    await this.page.goto('https://www.onlinejobs.ph/login', { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await this.page.waitForTimeout(1500);
-
-    if (!this.page.url().includes('/login')) {
-      this.log('www session established via redirect');
-      return;
-    }
-
-    const emailInput = this.page.locator('input[name="info[email]"], input#login_username');
-    const passwordInput = this.page.locator('input[name="info[password]"], input#login_password');
-    await emailInput.waitFor({ state: 'visible', timeout: 15000 });
-    await emailInput.fill(email);
-    await passwordInput.fill(password);
-
-    await Promise.all([
-      this.page.waitForURL((url) => !url.href.includes('/login'), { timeout: 30000 }),
-      this.page.locator('button[name="login"], button:has-text("Login")').first().click(),
-    ]).catch(async () => {
-      await this.page.locator('button[name="login"], button:has-text("Login")').first().click();
-      await this.page.waitForTimeout(3000);
-    });
-
-    if (this.page.url().includes('/login')) {
+    const ok = await this.loginOnWww(email, password).catch(() => false);
+    if (!ok) {
       throw new Error('www.onlinejobs.ph login failed — cannot access apply buttons');
     }
-    this.log(`www login successful → ${this.page.url()}`);
   }
 
   async readJobPageState() {
