@@ -214,16 +214,30 @@ function isNavigableApplyUrl(url) {
   return lower.startsWith('http://') || lower.startsWith('https://');
 }
 
+export function isNativeApplyUrl(url) {
+  if (!url || url.toLowerCase().startsWith('javascript:')) return false;
+  try {
+    const u = new URL(url);
+    if (!u.hostname.includes('onlinejobs.ph')) return false;
+    return u.pathname.includes('/apply') || u.pathname.endsWith('/apply');
+  } catch {
+    return /onlinejobs\.ph/i.test(url) && /\/apply/i.test(url);
+  }
+}
+
 function pickApplyHref(anchors) {
   const matches = anchors
     .map((a) => ({ href: a.href, text: (a.textContent || '').trim() }))
     .filter((x) => /apply for this job|apply now/i.test(x.text) || /\/apply/i.test(x.href));
 
-  const http = matches.find((x) => isNavigableApplyUrl(x.href));
-  if (http) return http.href;
+  const native = matches.find((x) => isNativeApplyUrl(x.href));
+  if (native) return native.href;
 
   const js = matches.find((x) => x.href.toLowerCase().startsWith('javascript:'));
   if (js) return js.href;
+
+  const http = matches.find((x) => isNavigableApplyUrl(x.href));
+  if (http) return http.href;
 
   return matches[0]?.href || null;
 }
@@ -552,18 +566,28 @@ export class JobApplicationAgent {
   }
 
   async readJobPageState() {
-    return this.page.evaluate(() => {
+    const pageData = await this.page.evaluate(() => {
       const text = document.body.innerText || '';
+      const anchors = [...document.querySelectorAll('a[href]')].map((a) => ({
+        href: a.href,
+        text: (a.textContent || '').trim(),
+      }));
       return {
-        needsLogin: /please\s+login.*apply for this job/i.test(text),
-        alreadyApplied: /already applied|you have applied|application sent/i.test(text),
-        applyHref: pickApplyHref([...document.querySelectorAll('a[href]')]),
+        text,
+        anchors,
         jobNumericId:
           document.querySelector('[data-jobid]')?.getAttribute('data-jobid') ||
           document.querySelector('#jobIdText')?.value ||
           null,
       };
     });
+
+    return {
+      needsLogin: /please\s+login.*apply for this job/i.test(pageData.text),
+      alreadyApplied: /already applied|you have applied|application sent/i.test(pageData.text),
+      applyHref: pickApplyHref(pageData.anchors.map((a) => ({ href: a.href, textContent: a.text }))),
+      jobNumericId: pageData.jobNumericId,
+    };
   }
 
   async runApplicationLoop() {
@@ -760,15 +784,24 @@ export class JobApplicationAgent {
         document.querySelector(
           '[class*="job-description"], [class*="description"], #job-description, .job-overview, article'
         )?.textContent?.trim() || document.body.innerText.slice(0, 5000);
-      const applyHref = pickApplyHref([...document.querySelectorAll('a[href]')]);
-      return { title, company, description, pageText: document.body.innerText.slice(0, 4000), applyHref };
+      const anchors = [...document.querySelectorAll('a[href]')].map((a) => ({
+        href: a.href,
+        text: (a.textContent || '').trim(),
+      }));
+      return { title, company, description, pageText: document.body.innerText.slice(0, 4000), anchors };
     });
 
     const jobTitle = cleanJobTitle(jobDetails.title, job.id) || job.title;
+    const applyHref = pickApplyHref(jobDetails.anchors.map((a) => ({ href: a.href, textContent: a.text })));
 
     const relevance = isRelevantDevJob(jobTitle);
     if (!relevance.relevant) {
       this.log(`Skip: ${relevance.reason}`, { jobTitle, jobUrl: job.url });
+      return false;
+    }
+
+    if (applyHref && isNavigableApplyUrl(applyHref) && !isNativeApplyUrl(applyHref)) {
+      this.log('Skip: external application (not OnlineJobs native apply)', { jobTitle, jobUrl: job.url });
       return false;
     }
 
@@ -786,7 +819,7 @@ export class JobApplicationAgent {
     this.updateStatus({ currentAction: 'Clicking Apply For This Job' });
     const applied = await this.clickApplyButton({
       job,
-      knownApplyHref: jobDetails.applyHref || refreshedState.applyHref,
+      knownApplyHref: applyHref || refreshedState.applyHref,
       jobNumericId: refreshedState.jobNumericId || numericJobId(job),
     });
     if (!applied) throw new Error('Apply For This Job button not found');
@@ -825,7 +858,7 @@ export class JobApplicationAgent {
 
   async isOnApplyForm() {
     const url = this.page.url();
-    if (/\/apply/i.test(url)) return true;
+    if (isNativeApplyUrl(url)) return true;
     return this.page
       .locator('input[name="subject"], textarea[name="message"], textarea[name="body"]')
       .first()
@@ -849,7 +882,7 @@ export class JobApplicationAgent {
       () => this.page.getByRole('button', { name: /apply for this job/i }),
       () => this.page.getByRole('link', { name: /apply now/i }),
       () => this.page.locator('a, button, input[type="submit"]').filter({ hasText: /apply for this job/i }),
-      () => this.page.locator('a[href*="/apply"]'),
+      () => this.page.locator('a[href*="onlinejobs.ph"][href*="/apply"]'),
     ];
 
     for (const getLocator of clickStrategies) {
@@ -872,7 +905,7 @@ export class JobApplicationAgent {
       ...buildApplyUrls(job),
       jobNumericId ? `https://www.onlinejobs.ph/apply?job_id=${jobNumericId}` : null,
     ]
-      .filter((url) => isNavigableApplyUrl(url));
+      .filter((url) => isNativeApplyUrl(url));
 
     for (const url of [...new Set(tryUrls)]) {
       this.log(`Trying apply URL: ${url}`);
@@ -885,13 +918,16 @@ export class JobApplicationAgent {
       for (const a of document.querySelectorAll('a')) {
         const text = (a.textContent || '').toLowerCase();
         const h = (a.href || '').toLowerCase();
-        if (text.includes('apply for this job') || text.includes('apply now')) return a.href;
-        if (h.includes('/apply') && h.startsWith('http')) return a.href;
+        if (h.startsWith('javascript:')) continue;
+        if (h.includes('onlinejobs.ph') && h.includes('/apply')) return a.href;
+        if ((text.includes('apply for this job') || text.includes('apply now')) && h.includes('onlinejobs.ph')) {
+          return a.href;
+        }
       }
       return null;
     });
 
-    if (isNavigableApplyUrl(href)) {
+    if (isNativeApplyUrl(href)) {
       await this.page.goto(href, { waitUntil: 'domcontentloaded', timeout: 30000 });
       return this.isOnApplyForm();
     }
