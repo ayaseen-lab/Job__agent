@@ -75,6 +75,26 @@ function numericJobId(job) {
   return fromSlug || null;
 }
 
+function isNavigableApplyUrl(url) {
+  if (!url) return false;
+  const lower = url.toLowerCase();
+  return lower.startsWith('http://') || lower.startsWith('https://');
+}
+
+function pickApplyHref(anchors) {
+  const matches = anchors
+    .map((a) => ({ href: a.href, text: (a.textContent || '').trim() }))
+    .filter((x) => /apply for this job|apply now/i.test(x.text) || /\/apply/i.test(x.href));
+
+  const http = matches.find((x) => isNavigableApplyUrl(x.href));
+  if (http) return http.href;
+
+  const js = matches.find((x) => x.href.toLowerCase().startsWith('javascript:'));
+  if (js) return js.href;
+
+  return matches[0]?.href || null;
+}
+
 function buildApplyUrls(job) {
   const urls = [];
   if (job.url) urls.push(`${job.url.replace(/\/$/, '')}/apply`);
@@ -404,9 +424,7 @@ export class JobApplicationAgent {
       return {
         needsLogin: /please\s+login.*apply for this job/i.test(text),
         alreadyApplied: /already applied|you have applied|application sent/i.test(text),
-        applyHref: [...document.querySelectorAll('a[href]')]
-          .map((a) => ({ href: a.href, text: (a.textContent || '').trim() }))
-          .find((x) => /apply for this job/i.test(x.text) || /\/apply/i.test(x.href))?.href,
+        applyHref: pickApplyHref([...document.querySelectorAll('a[href]')]),
         jobNumericId:
           document.querySelector('[data-jobid]')?.getAttribute('data-jobid') ||
           document.querySelector('#jobIdText')?.value ||
@@ -595,9 +613,7 @@ export class JobApplicationAgent {
         document.querySelector(
           '[class*="job-description"], [class*="description"], #job-description, .job-overview, article'
         )?.textContent?.trim() || document.body.innerText.slice(0, 5000);
-      const applyHref = [...document.querySelectorAll('a[href]')]
-        .map((a) => ({ href: a.href, text: a.textContent?.trim() || '' }))
-        .find((x) => /apply/i.test(x.text) || /\/apply/i.test(x.href))?.href;
+      const applyHref = pickApplyHref([...document.querySelectorAll('a[href]')]);
       return { title, company, description, pageText: document.body.innerText.slice(0, 4000), applyHref };
     });
 
@@ -664,20 +680,7 @@ export class JobApplicationAgent {
   }
 
   async clickApplyButton({ job, knownApplyHref, jobNumericId }) {
-    const tryUrls = [
-      knownApplyHref,
-      ...buildApplyUrls(job),
-      jobNumericId ? `https://www.onlinejobs.ph/apply?job_id=${jobNumericId}` : null,
-    ].filter(Boolean);
-
-    for (const url of [...new Set(tryUrls)]) {
-      this.log(`Trying apply URL: ${url}`);
-      await this.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      await this.page.waitForTimeout(1500);
-      if (await this.isOnApplyForm()) return true;
-    }
-
-    // Return to job page for button click strategies
+    // Click apply button first — OnlineJobs often uses javascript:apply() links
     if (job?.url) {
       await this.page.goto(job.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
       await this.page.waitForTimeout(2000);
@@ -685,7 +688,8 @@ export class JobApplicationAgent {
 
     await this.page.evaluate(() => window.scrollTo(0, 300));
 
-    const strategies = [
+    const clickStrategies = [
+      () => this.page.locator('a[href*="javascript:apply"], a[onclick*="apply"]').first(),
       () => this.page.locator('a.btn, button.btn, input.btn').filter({ hasText: /apply for this job/i }),
       () => this.page.getByRole('link', { name: /apply for this job/i }),
       () => this.page.getByRole('button', { name: /apply for this job/i }),
@@ -694,31 +698,46 @@ export class JobApplicationAgent {
       () => this.page.locator('a[href*="/apply"]'),
     ];
 
-    for (const getLocator of strategies) {
+    for (const getLocator of clickStrategies) {
       try {
-        const el = getLocator().first();
-        await el.waitFor({ state: 'visible', timeout: 5000 });
-        await el.scrollIntoViewIfNeeded();
-        await fastClick(el);
-        await this.page.waitForTimeout(2000);
+        const el = getLocator();
+        if (!(await el.count())) continue;
+        const target = el.first();
+        await target.waitFor({ state: 'visible', timeout: 5000 });
+        await target.scrollIntoViewIfNeeded();
+        await fastClick(target);
+        await this.page.waitForTimeout(2500);
         if (await this.isOnApplyForm()) return true;
       } catch {
         /* try next */
       }
     }
 
+    const tryUrls = [
+      knownApplyHref,
+      ...buildApplyUrls(job),
+      jobNumericId ? `https://www.onlinejobs.ph/apply?job_id=${jobNumericId}` : null,
+    ]
+      .filter((url) => isNavigableApplyUrl(url));
+
+    for (const url of [...new Set(tryUrls)]) {
+      this.log(`Trying apply URL: ${url}`);
+      await this.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await this.page.waitForTimeout(1500);
+      if (await this.isOnApplyForm()) return true;
+    }
+
     const href = await this.page.evaluate(() => {
       for (const a of document.querySelectorAll('a')) {
         const text = (a.textContent || '').toLowerCase();
         const h = (a.href || '').toLowerCase();
-        if (text.includes('apply for this job') || text.includes('apply now') || h.includes('/apply')) {
-          return a.href;
-        }
+        if (text.includes('apply for this job') || text.includes('apply now')) return a.href;
+        if (h.includes('/apply') && h.startsWith('http')) return a.href;
       }
       return null;
     });
 
-    if (href) {
+    if (isNavigableApplyUrl(href)) {
       await this.page.goto(href, { waitUntil: 'domcontentloaded', timeout: 30000 });
       return this.isOnApplyForm();
     }
