@@ -859,11 +859,44 @@ export class JobApplicationAgent {
   async isOnApplyForm() {
     const url = this.page.url();
     if (isNativeApplyUrl(url)) return true;
-    return this.page
-      .locator('input[name="subject"], textarea[name="message"], textarea[name="body"]')
-      .first()
-      .isVisible({ timeout: 2000 })
-      .catch(() => false);
+
+    return this.page.evaluate(() => {
+      const msg = document.querySelector('textarea[name="message"], textarea#message, textarea[name="body"]');
+      const subj = document.querySelector('input[name="subject"], input#subject');
+      if (!msg || !subj) return false;
+
+      const hasSend = [...document.querySelectorAll('button, input[type="submit"], a.btn')].some((el) =>
+        /send\s*email|send\s*application|send\s*message/i.test(`${el.textContent || ''} ${el.value || ''}`),
+      );
+      return hasSend || window.location.href.includes('/apply');
+    });
+  }
+
+  async waitForApplyForm(timeout = 20000) {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      if (await this.isOnApplyForm()) return true;
+      await this.page.waitForTimeout(500);
+    }
+    return false;
+  }
+
+  async triggerJavascriptApply() {
+    return this.page.evaluate(() => {
+      const fns = [globalThis.apply, globalThis.Apply, globalThis.openApply];
+      for (const fn of fns) {
+        if (typeof fn === 'function') {
+          fn();
+          return true;
+        }
+      }
+      const link = document.querySelector('a[href*="javascript:apply"], a[onclick*="apply"]');
+      if (link) {
+        link.click();
+        return true;
+      }
+      return false;
+    });
   }
 
   async clickApplyButton({ job, knownApplyHref, jobNumericId }) {
@@ -874,6 +907,10 @@ export class JobApplicationAgent {
     }
 
     await this.page.evaluate(() => window.scrollTo(0, 300));
+
+    await this.triggerJavascriptApply();
+    await this.page.waitForTimeout(1500);
+    if (await this.waitForApplyForm(8000)) return true;
 
     const clickStrategies = [
       () => this.page.locator('a[href*="javascript:apply"], a[onclick*="apply"]').first(),
@@ -893,8 +930,9 @@ export class JobApplicationAgent {
         await target.waitFor({ state: 'visible', timeout: 5000 });
         await target.scrollIntoViewIfNeeded();
         await fastClick(target);
-        await this.page.waitForTimeout(2500);
-        if (await this.isOnApplyForm()) return true;
+        await this.page.waitForTimeout(1500);
+        await this.page.waitForURL(/\/apply/i, { timeout: 10000 }).catch(() => {});
+        if (await this.waitForApplyForm(12000)) return true;
       } catch {
         /* try next */
       }
@@ -911,7 +949,7 @@ export class JobApplicationAgent {
       this.log(`Trying apply URL: ${url}`);
       await this.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
       await this.page.waitForTimeout(1500);
-      if (await this.isOnApplyForm()) return true;
+      if (await this.waitForApplyForm(8000)) return true;
     }
 
     const href = await this.page.evaluate(() => {
@@ -929,7 +967,7 @@ export class JobApplicationAgent {
 
     if (isNativeApplyUrl(href)) {
       await this.page.goto(href, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      return this.isOnApplyForm();
+      return this.waitForApplyForm(8000);
     }
 
     return false;
@@ -937,6 +975,7 @@ export class JobApplicationAgent {
 
   async fillApplicationForm({ subject, body }) {
     this.updateStatus({ currentAction: 'Filling application form' });
+    await this.waitForApplyForm(15000);
     await this.page.waitForLoadState('domcontentloaded');
 
     // Read apply points from form page
