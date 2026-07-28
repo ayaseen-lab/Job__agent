@@ -192,6 +192,7 @@ socket.on('analytics', renderCharts);
 socket.on('application', () => {
   fetch(`${API_BASE}/api/applied`).then((r) => r.json()).then(renderHistory);
   fetch(`${API_BASE}/api/analytics`).then((r) => r.json()).then(renderCharts);
+  fetch(`${API_BASE}/api/status`).then((r) => r.json()).then(updateUI);
 });
 
 $('btnStart').addEventListener('click', async () => {

@@ -48,7 +48,13 @@ function startAgent(source = 'manual') {
   agent = new JobApplicationAgent({
     io,
     onStatusChange: (status) => {
-      agentStatus = { ...agentStatus, ...status, totalApplied: getAppliedCount() };
+      const today = getTodayStats();
+      agentStatus = {
+        ...agentStatus,
+        ...status,
+        totalApplied: getAppliedCount(),
+        jobsAppliedToday: today.jobs_applied,
+      };
     },
   });
 

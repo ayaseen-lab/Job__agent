@@ -28,6 +28,21 @@ function buildSearchUrl(keyword, page = 1) {
   return page === 1 ? base : `${base}&page=${page}`;
 }
 
+function titleFromSlug(slug) {
+  return slug
+    .replace(/-\d+$/, '')
+    .replace(/-/g, ' ')
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function cleanJobTitle(title, slug) {
+  const t = (title || '').trim();
+  if (!t || t.length > 120 || /posted on|per month|\$\d|PHP/i.test(t)) {
+    return titleFromSlug(slug);
+  }
+  return t.split(/\s{2,}|•/)[0].trim() || titleFromSlug(slug);
+}
+
 export function parsePostedDate(text) {
   const lower = (text || '').toLowerCase();
   const today = new Date().toISOString().slice(0, 10);
@@ -52,6 +67,22 @@ export function parsePostedDate(text) {
     return { score: Math.max(10, 70 - days * 15), label: `${days}d ago` };
   }
   return { score: 20, label: 'Older' };
+}
+
+function numericJobId(job) {
+  const fromSlug = job.id?.match(/-(\d+)$/)?.[1];
+  return fromSlug || null;
+}
+
+function buildApplyUrls(job) {
+  const urls = [];
+  if (job.url) urls.push(`${job.url.replace(/\/$/, '')}/apply`);
+  const numId = numericJobId(job);
+  if (numId) {
+    urls.push(`https://www.onlinejobs.ph/apply?job_id=${numId}`);
+    urls.push(`https://www.onlinejobs.ph/apply?jid=${numId}`);
+  }
+  return urls;
 }
 
 function parseConnectsFromText(text) {
@@ -231,7 +262,76 @@ export class JobApplicationAgent {
     }
 
     this.log(`Login successful → ${this.page.url()}`);
+    await this.ensureWwwSession(email, password);
     await pause('short');
+  }
+
+  async ensureWwwSession(email, password) {
+    email = email || process.env.OJ_EMAIL;
+    password = password || process.env.OJ_PASSWORD;
+
+    this.log('Syncing www.onlinejobs.ph session');
+    await this.page.goto('https://www.onlinejobs.ph/jobseekers/jobsearch?jobkeyword=React', {
+      waitUntil: 'domcontentloaded',
+      timeout: 60000,
+    });
+    await this.page.waitForTimeout(2000);
+
+    const loggedIn = await this.page.evaluate(() => {
+      const navLogin = document.querySelector('a[href="/login"]');
+      const navText = navLogin?.textContent?.toLowerCase() || '';
+      return !navText.includes('log in');
+    });
+
+    if (loggedIn) {
+      this.log('www session active');
+      return;
+    }
+
+    this.log('Logging in on www.onlinejobs.ph');
+    await this.page.goto('https://www.onlinejobs.ph/login', { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await this.page.waitForTimeout(1500);
+
+    if (!this.page.url().includes('/login')) {
+      this.log('www session established via redirect');
+      return;
+    }
+
+    const emailInput = this.page.locator('input[name="info[email]"], input#login_username');
+    const passwordInput = this.page.locator('input[name="info[password]"], input#login_password');
+    await emailInput.waitFor({ state: 'visible', timeout: 15000 });
+    await emailInput.fill(email);
+    await passwordInput.fill(password);
+
+    await Promise.all([
+      this.page.waitForURL((url) => !url.href.includes('/login'), { timeout: 30000 }),
+      this.page.locator('button[name="login"], button:has-text("Login")').first().click(),
+    ]).catch(async () => {
+      await this.page.locator('button[name="login"], button:has-text("Login")').first().click();
+      await this.page.waitForTimeout(3000);
+    });
+
+    if (this.page.url().includes('/login')) {
+      throw new Error('www.onlinejobs.ph login failed — cannot access apply buttons');
+    }
+    this.log(`www login successful → ${this.page.url()}`);
+  }
+
+  async readJobPageState() {
+    return this.page.evaluate(() => {
+      const text = document.body.innerText || '';
+      return {
+        needsLogin: /please\s+login.*apply for this job/i.test(text),
+        alreadyApplied: /already applied|you have applied|application sent/i.test(text),
+        applyHref: [...document.querySelectorAll('a[href]')]
+          .map((a) => ({ href: a.href, text: (a.textContent || '').trim() }))
+          .find((x) => /apply for this job/i.test(x.text) || /\/apply/i.test(x.href))?.href,
+        jobNumericId:
+          document.querySelector('[data-jobid]')?.getAttribute('data-jobid') ||
+          document.querySelector('#jobIdText')?.value ||
+          null,
+      };
+    });
   }
 
   async runApplicationLoop() {
@@ -312,48 +412,44 @@ export class JobApplicationAgent {
       const results = [];
       const seen = new Set();
 
-      // Job cards: title links to /jobseekers/job/slug-id
-      const anchors = document.querySelectorAll('a[href*="/jobseekers/job/"]');
+      const pickTitle = (a, slug) => {
+        const h = a.querySelector('h4, h3, h2');
+        if (h?.textContent?.trim()) return h.textContent.trim();
+        const t = a.textContent?.trim() || '';
+        if (t.length >= 10 && t.length <= 100 && !/posted on/i.test(t)) return t;
+        return slug.replace(/-\d+$/, '').replace(/-/g, ' ');
+      };
 
-      for (const a of anchors) {
+      for (const a of document.querySelectorAll('a[href*="/jobseekers/job/"]')) {
         const href = a.href || a.getAttribute('href') || '';
         const fullUrl = href.startsWith('http') ? href : `https://www.onlinejobs.ph${href}`;
         const match = fullUrl.match(/\/jobseekers\/job\/([^/?#]+)/);
         if (!match || seen.has(match[1])) continue;
-
-        const title = a.textContent?.trim() || '';
-        // Skip short/non-title links (nav, breadcrumbs)
-        if (title.length < 10) continue;
-        // Skip if looks like a button not a title
-        if (/^(apply|bookmark|see more|back)/i.test(title)) continue;
+        if (/^(apply|bookmark|see more|back)/i.test(a.textContent?.trim() || '')) continue;
 
         seen.add(match[1]);
-
-        const card = a.closest('div[class], article, li, section') || a.parentElement?.parentElement;
-        const contextText = card?.textContent || a.textContent || '';
+        const card = a.closest('div, article, li, section') || a.parentElement?.parentElement;
 
         results.push({
           id: match[1],
           url: fullUrl.split('?')[0],
-          title,
-          contextText,
+          title: pickTitle(a, match[1]),
+          contextText: card?.textContent || '',
         });
       }
-
-      // Deduplicate by keeping longest title per id
-      const byId = {};
-      for (const r of results) {
-        if (!byId[r.id] || r.title.length > byId[r.id].title.length) {
-          byId[r.id] = r;
-        }
-      }
-      return Object.values(byId);
+      return results;
     });
 
     return links
       .map((job) => {
         const posted = parsePostedDate(job.contextText);
-        return { ...job, searchKeyword: keyword, postedScore: posted.score, postedLabel: posted.label };
+        return {
+          ...job,
+          title: cleanJobTitle(job.title, job.id),
+          searchKeyword: keyword,
+          postedScore: posted.score,
+          postedLabel: posted.label,
+        };
       })
       .sort((a, b) => b.postedScore - a.postedScore);
   }
@@ -369,10 +465,43 @@ export class JobApplicationAgent {
 
     // Open job detail page on www.onlinejobs.ph
     await this.page.goto(job.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await this.page.waitForTimeout(2000);
+    await this.page.waitForTimeout(3000);
+
+    // Scroll to load apply button area
+    await this.page.evaluate(() => window.scrollTo(0, 0));
+    await this.page.waitForTimeout(500);
+    await this.page.evaluate(() => window.scrollTo(0, 400));
+    await this.page.waitForTimeout(1000);
 
     if (this.page.url().includes('v2.onlinejobs.ph/jobseekers') && !this.page.url().includes('/job/')) {
       throw new Error('Redirected away from job page — session issue');
+    }
+
+    const pageState = await this.readJobPageState();
+
+    if (pageState.needsLogin) {
+      this.log('Job page requires login — refreshing www session', { level: 'warn' });
+      await this.ensureWwwSession();
+      await this.page.goto(job.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await this.page.waitForTimeout(2500);
+    }
+
+    const refreshedState = await this.readJobPageState();
+    if (refreshedState.alreadyApplied) {
+      this.log(`Skip: already applied — ${job.title}`);
+      markJobApplied({
+        jobId: job.id,
+        jobUrl: job.url,
+        jobTitle: job.title,
+        subject: '(already applied on site)',
+        body: '(skipped)',
+        description: '',
+        companyName: '',
+        searchKeyword: job.searchKeyword,
+        postedLabel: job.postedLabel,
+        postedScore: job.postedScore,
+      });
+      return false;
     }
 
     const jobDetails = await this.page.evaluate(() => {
@@ -385,10 +514,13 @@ export class JobApplicationAgent {
         document.querySelector(
           '[class*="job-description"], [class*="description"], #job-description, .job-overview, article'
         )?.textContent?.trim() || document.body.innerText.slice(0, 5000);
-      return { title, company, description, pageText: document.body.innerText.slice(0, 4000) };
+      const applyHref = [...document.querySelectorAll('a[href]')]
+        .map((a) => ({ href: a.href, text: a.textContent?.trim() || '' }))
+        .find((x) => /apply/i.test(x.text) || /\/apply/i.test(x.href))?.href;
+      return { title, company, description, pageText: document.body.innerText.slice(0, 4000), applyHref };
     });
 
-    const jobTitle = jobDetails.title || job.title;
+    const jobTitle = cleanJobTitle(jobDetails.title, job.id) || job.title;
     const posted = parsePostedDate(jobDetails.pageText || job.contextText);
 
     this.updateStatus({ currentAction: `Writing application for: ${jobTitle}` });
@@ -399,9 +531,13 @@ export class JobApplicationAgent {
     });
     this.log(`Message ready (${mode})`, { jobTitle, jobUrl: job.url });
 
-    // Click green "APPLY FOR THIS JOB" button
+    // Click green "APPLY FOR THIS JOB" button (or navigate directly to apply URL)
     this.updateStatus({ currentAction: 'Clicking Apply For This Job' });
-    const applied = await this.clickApplyButton();
+    const applied = await this.clickApplyButton({
+      job,
+      knownApplyHref: jobDetails.applyHref || refreshedState.applyHref,
+      jobNumericId: refreshedState.jobNumericId || numericJobId(job),
+    });
     if (!applied) throw new Error('Apply For This Job button not found');
 
     await this.page.waitForURL(/\/apply/i, { timeout: 15000 }).catch(() => {});
@@ -436,25 +572,76 @@ export class JobApplicationAgent {
     return true;
   }
 
-  async clickApplyButton() {
-    const selectors = [
-      'a:has-text("APPLY FOR THIS JOB")',
-      'button:has-text("APPLY FOR THIS JOB")',
-      'a:has-text("Apply for this job")',
-      'button:has-text("Apply for this job")',
-      'a:has-text("Apply For This Job")',
-      'button:has-text("Apply For This Job")',
-      'a:has-text("Apply Now")',
-      'a[href*="/apply"]',
+  async isOnApplyForm() {
+    const url = this.page.url();
+    if (/\/apply/i.test(url)) return true;
+    return this.page
+      .locator('input[name="subject"], textarea[name="message"], textarea[name="body"]')
+      .first()
+      .isVisible({ timeout: 2000 })
+      .catch(() => false);
+  }
+
+  async clickApplyButton({ job, knownApplyHref, jobNumericId }) {
+    const tryUrls = [
+      knownApplyHref,
+      ...buildApplyUrls(job),
+      jobNumericId ? `https://www.onlinejobs.ph/apply?job_id=${jobNumericId}` : null,
+    ].filter(Boolean);
+
+    for (const url of [...new Set(tryUrls)]) {
+      this.log(`Trying apply URL: ${url}`);
+      await this.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await this.page.waitForTimeout(1500);
+      if (await this.isOnApplyForm()) return true;
+    }
+
+    // Return to job page for button click strategies
+    if (job?.url) {
+      await this.page.goto(job.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await this.page.waitForTimeout(2000);
+    }
+
+    await this.page.evaluate(() => window.scrollTo(0, 300));
+
+    const strategies = [
+      () => this.page.locator('a.btn, button.btn, input.btn').filter({ hasText: /apply for this job/i }),
+      () => this.page.getByRole('link', { name: /apply for this job/i }),
+      () => this.page.getByRole('button', { name: /apply for this job/i }),
+      () => this.page.getByRole('link', { name: /apply now/i }),
+      () => this.page.locator('a, button, input[type="submit"]').filter({ hasText: /apply for this job/i }),
+      () => this.page.locator('a[href*="/apply"]'),
     ];
 
-    for (const sel of selectors) {
-      const el = this.page.locator(sel).first();
-      if (await el.isVisible({ timeout: 3000 }).catch(() => false)) {
+    for (const getLocator of strategies) {
+      try {
+        const el = getLocator().first();
+        await el.waitFor({ state: 'visible', timeout: 5000 });
+        await el.scrollIntoViewIfNeeded();
         await fastClick(el);
-        return true;
+        await this.page.waitForTimeout(2000);
+        if (await this.isOnApplyForm()) return true;
+      } catch {
+        /* try next */
       }
     }
+
+    const href = await this.page.evaluate(() => {
+      for (const a of document.querySelectorAll('a')) {
+        const text = (a.textContent || '').toLowerCase();
+        const h = (a.href || '').toLowerCase();
+        if (text.includes('apply for this job') || text.includes('apply now') || h.includes('/apply')) {
+          return a.href;
+        }
+      }
+      return null;
+    });
+
+    if (href) {
+      await this.page.goto(href, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      return this.isOnApplyForm();
+    }
+
     return false;
   }
 
