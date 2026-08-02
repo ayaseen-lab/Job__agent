@@ -11,8 +11,11 @@ let totalAppliedCount = 0;
 const STATE_LABELS = {
   idle: 'Idle', starting: 'Starting', logging_in: 'Logging In',
   searching: 'Searching Jobs', applying: 'Applying', stopping: 'Stopping',
-  stopped_no_connects: 'No Connects', error: 'Error',
+  stopped_no_connects: 'No Connects', stopped_by_user: 'Stopped',
+  error: 'Error',
 };
+
+const RUNNING_STATES = ['starting', 'logging_in', 'searching', 'applying', 'stopping'];
 
 
 function escapeHtml(str) {
@@ -37,8 +40,9 @@ function updateUI(status) {
 
   const dot = $('statusDot');
   dot.className = 'status-dot';
-  if (['starting', 'logging_in', 'searching', 'applying'].includes(state)) dot.classList.add('running');
+  if (RUNNING_STATES.filter((s) => s !== 'stopping').includes(state)) dot.classList.add('running');
   else if (state === 'stopped_no_connects') dot.classList.add('warning');
+  else if (state === 'stopped_by_user') dot.classList.add('stopped');
   else if (state === 'error') dot.classList.add('error');
 
   $('connectsValue').textContent = status.connectsRemaining ?? '—';
@@ -56,9 +60,18 @@ function updateUI(status) {
     $('currentJobCard').hidden = true;
   }
 
-  const isRunning = ['starting', 'logging_in', 'searching', 'applying', 'stopping'].includes(state);
-  $('btnStart').disabled = isRunning;
+  const isRunning = RUNNING_STATES.includes(state);
+  const stoppedByUser = status.stoppedByUser || state === 'stopped_by_user';
+  const canStart = status.canStart ?? !isRunning;
+
+  $('btnStart').disabled = !canStart;
+  $('btnStart').textContent = stoppedByUser && !isRunning ? '▶ Resume Agent' : '▶ Start Agent';
   $('btnStop').disabled = !isRunning;
+
+  const banner = $('stoppedBanner');
+  if (banner) {
+    banner.hidden = !stoppedByUser || isRunning;
+  }
 
   resumeAt = status.resumeAt;
   if (resumeAt && state === 'stopped_no_connects') {
@@ -237,7 +250,6 @@ $('btnStart').addEventListener('click', async () => {
   }
 });
 $('btnStop').addEventListener('click', async () => {
-  $('btnStop').disabled = true;
   updateUI({ ...lastStatus, state: 'stopping', currentAction: 'Stopping...', currentJob: null });
   try {
     const res = await fetch(`${API_BASE}/api/stop`, { method: 'POST' });
@@ -246,7 +258,6 @@ $('btnStop').addEventListener('click', async () => {
     updateUI(status);
   } catch {
     addLog({ timestamp: new Date().toISOString(), level: 'error', message: 'Failed to stop agent — try again' });
-    $('btnStop').disabled = false;
   }
 });
 $('btnReset').addEventListener('click', async () => {

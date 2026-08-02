@@ -364,8 +364,8 @@ export class JobApplicationAgent {
       this.running = false;
       if (this.stopped) {
         this.updateStatus({
-          state: 'idle',
-          currentAction: 'Stopped by user',
+          state: 'stopped_by_user',
+          currentAction: 'Stopped — click Start to resume',
           currentJob: null,
           currentSearch: null,
         });
@@ -378,6 +378,7 @@ export class JobApplicationAgent {
   stop() {
     if (!this.running && !this.browser) return;
     this.stopped = true;
+    this.running = false;
     this.log('Stop requested', { level: 'warn' });
     this.updateStatus({
       state: 'stopping',

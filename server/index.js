@@ -16,6 +16,9 @@ import {
   logActivity,
   getConnectsExhaustedAt,
   clearConnectsExhausted,
+  getUserStopped,
+  setUserStopped,
+  clearUserStopped,
 } from './db.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -29,9 +32,10 @@ app.use(express.json());
 app.use(express.static(join(__dirname, '..', 'public')));
 
 let agent = null;
+const bootUserStopped = getUserStopped();
 let agentStatus = {
-  state: 'idle',
-  currentAction: 'Ready',
+  state: bootUserStopped ? 'stopped_by_user' : 'idle',
+  currentAction: bootUserStopped ? 'Stopped — click Start to resume' : 'Ready',
   currentJob: null,
   currentSearch: null,
   connectsRemaining: null,
@@ -39,10 +43,30 @@ let agentStatus = {
   totalApplied: getAppliedCount(),
   resumeAt: getConnectsExhaustedAt(),
   lastError: null,
+  stoppedByUser: bootUserStopped,
+  canStart: true,
 };
+
+function emitStatus(extra = {}) {
+  const today = getTodayStats();
+  const payload = {
+    ...agentStatus,
+    ...extra,
+    jobsAppliedToday: today.jobs_applied,
+    connectsRemaining: agentStatus.connectsRemaining ?? today.connects_remaining,
+    stoppedByUser: getUserStopped(),
+    canStart: !agent?.running,
+    totalApplied: getAppliedCount(),
+    resumeAt: getConnectsExhaustedAt(),
+  };
+  agentStatus = { ...agentStatus, ...payload };
+  io.emit('status', payload);
+  return payload;
+}
 
 function startAgent(source = 'manual') {
   if (agent?.running) return false;
+  if (getUserStopped()) return false;
 
   logActivity({ message: `Agent started (${source})` });
   agent = new JobApplicationAgent({
@@ -54,13 +78,14 @@ function startAgent(source = 'manual') {
         ...status,
         totalApplied: getAppliedCount(),
         jobsAppliedToday: today.jobs_applied,
+        stoppedByUser: getUserStopped(),
+        canStart: false,
       };
     },
   });
 
   agent.start().then(() => {
-    agentStatus.totalApplied = getAppliedCount();
-    io.emit('status', agentStatus);
+    emitStatus();
     io.emit('applied', getAppliedJobs(200));
     io.emit('analytics', getAnalytics());
   });
@@ -76,6 +101,8 @@ app.get('/api/status', (_req, res) => {
     stoppedReason: today.stopped_reason,
     totalApplied: getAppliedCount(),
     resumeAt: getConnectsExhaustedAt(),
+    stoppedByUser: getUserStopped(),
+    canStart: !agent?.running,
     searchKeywords: (process.env.JOB_KEYWORDS || 'React,Software Engineer,AI Engineer,Backend Developer').split(','),
   });
 });
@@ -86,26 +113,33 @@ app.get('/api/analytics', (_req, res) => res.json(getAnalytics()));
 
 app.post('/api/start', (_req, res) => {
   if (agent?.running) return res.status(409).json({ error: 'Agent is already running' });
+  clearUserStopped();
   clearConnectsExhausted();
   agentStatus.resumeAt = null;
+  agentStatus.stoppedByUser = false;
   startAgent('manual');
+  emitStatus({ state: 'starting', currentAction: 'Starting...' });
   res.json({ ok: true });
 });
 
 app.post('/api/stop', (_req, res) => {
-  if (agent?.running) {
+  setUserStopped(true);
+  if (agent) {
     agent.stop();
-    agentStatus = {
-      ...agentStatus,
-      state: 'stopping',
-      currentAction: 'Stopping...',
-      currentJob: null,
-      totalApplied: getAppliedCount(),
-    };
-    io.emit('status', agentStatus);
   }
-  logActivity({ message: 'Agent stopped by user', level: 'warn' });
-  res.json({ ok: true, running: !!agent?.running });
+  agentStatus = {
+    ...agentStatus,
+    state: 'stopped_by_user',
+    currentAction: 'Stopped — click Start to resume',
+    currentJob: null,
+    currentSearch: null,
+    stoppedByUser: true,
+    canStart: true,
+    totalApplied: getAppliedCount(),
+  };
+  emitStatus();
+  logActivity({ message: 'Agent stopped by user — system off until resume', level: 'warn' });
+  res.json({ ok: true, stoppedByUser: true, running: !!agent?.running });
 });
 
 app.post('/api/reset-daily', (_req, res) => {
@@ -117,6 +151,8 @@ app.post('/api/reset-daily', (_req, res) => {
 });
 
 function check24hResume() {
+  if (getUserStopped()) return;
+
   const resumeAt = getConnectsExhaustedAt();
   if (!resumeAt || agent?.running) return;
 
@@ -138,6 +174,10 @@ function check24hResume() {
 setInterval(check24hResume, 60_000);
 
 cron.schedule('0 8 * * *', () => {
+  if (getUserStopped()) {
+    logActivity({ message: '8 AM PHT — skipped daily auto-start (user stopped agent)' });
+    return;
+  }
   clearConnectsExhausted();
   updateTodayStats({ stoppedReason: null, connectsRemaining: null });
   logActivity({ message: '8 AM PHT — daily auto-start' });
@@ -151,6 +191,8 @@ io.on('connection', (socket) => {
     jobsAppliedToday: today.jobs_applied,
     resumeAt: getConnectsExhaustedAt(),
     totalApplied: getAppliedCount(),
+    stoppedByUser: getUserStopped(),
+    canStart: !agent?.running,
   });
   socket.emit('logs', getRecentLogs(150));
   socket.emit('applied', getAppliedJobs(200));
@@ -160,6 +202,8 @@ io.on('connection', (socket) => {
 httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`\n  JobFlow Agent — OnlineJobs.ph`);
   console.log(`  http://0.0.0.0:${PORT}\n`);
-  logActivity({ message: 'Server started' });
-  check24hResume();
+  logActivity({ message: getUserStopped() ? 'Server started — agent stopped by user, waiting for resume' : 'Server started' });
+  if (!getUserStopped()) {
+    check24hResume();
+  }
 });

@@ -12,7 +12,7 @@ const DEFAULT_STORE = {
   applied_jobs: [],
   daily_stats: {},
   activity_log: [],
-  settings: { connects_exhausted_at: null },
+  settings: { connects_exhausted_at: null, user_stopped: false },
 };
 
 function load() {
@@ -116,6 +116,20 @@ export function clearConnectsExhausted() {
   const data = load();
   data.settings.connects_exhausted_at = null;
   save(data);
+}
+
+export function getUserStopped() {
+  return load().settings.user_stopped === true;
+}
+
+export function setUserStopped(value) {
+  const data = load();
+  data.settings.user_stopped = value;
+  save(data);
+}
+
+export function clearUserStopped() {
+  setUserStopped(false);
 }
 
 export function logActivity({ level = 'info', message, jobTitle, jobUrl }) {

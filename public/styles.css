@@ -170,6 +170,24 @@ body {
   background: var(--surface); border: 1px solid var(--border);
   border-radius: 12px; padding: 16px 20px; margin-bottom: 20px;
 }
+.stopped-banner {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  background: rgba(248, 113, 113, 0.08);
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  border-radius: 12px;
+  padding: 16px 20px;
+  margin-bottom: 20px;
+}
+.stopped-banner strong { display: block; font-size: 0.95rem; margin-bottom: 4px; }
+.stopped-banner p { font-size: 0.85rem; color: var(--muted); }
+.stopped-icon {
+  font-size: 1.5rem;
+  color: var(--red);
+  line-height: 1;
+}
+.status-dot.stopped { background: var(--red); box-shadow: 0 0 8px rgba(248, 113, 113, 0.5); }
 .action-label { font-size: 0.68rem; font-weight: 700; letter-spacing: 0.1em; color: var(--accent); display: block; margin-bottom: 6px; }
 .action-text { font-size: 0.95rem; line-height: 1.4; }
 
