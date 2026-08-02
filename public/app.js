@@ -5,6 +5,8 @@ const $ = (id) => document.getElementById(id);
 let dailyChart = null;
 let keywordChart = null;
 let resumeAt = null;
+let lastStatus = {};
+let totalAppliedCount = 0;
 
 const STATE_LABELS = {
   idle: 'Idle', starting: 'Starting', logging_in: 'Logging In',
@@ -28,6 +30,8 @@ function formatDate(iso) {
 }
 
 function updateUI(status) {
+  lastStatus = status;
+  if (status.totalApplied != null) totalAppliedCount = status.totalApplied;
   const state = status.state || 'idle';
   $('statusLabel').textContent = STATE_LABELS[state] || state;
 
@@ -94,8 +98,32 @@ function addLog(entry, prepend = true) {
   while (feed.children.length > 200) feed.removeChild(feed.lastChild);
 }
 
+function titleFromSlug(slug) {
+  return (slug || '')
+    .replace(/-\d+$/, '')
+    .replace(/-/g, ' ')
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function displayJobTitle(job) {
+  const title = (job.job_title || '').trim().replace(/\s+/g, ' ');
+  const slugTitle = titleFromSlug(job.job_id);
+  if (!title || title.length > 80) return slugTitle;
+  if (/\b(we are|we're|looking for|seeking|requirements|qualifications|experience in)\b/i.test(title)) {
+    return slugTitle;
+  }
+  const cleaned = title.split(/\s{2,}|•|—|\||\n/)[0].trim();
+  return cleaned && cleaned.length <= 80 ? cleaned : slugTitle;
+}
+
 function renderHistory(jobs) {
-  $('historyCount').textContent = `${jobs.length} application${jobs.length !== 1 ? 's' : ''}`;
+  if (!Array.isArray(jobs)) return;
+
+  const total = totalAppliedCount || jobs.length;
+  $('historyCount').textContent =
+    total > jobs.length
+      ? `${jobs.length} of ${total} applications`
+      : `${total} application${total !== 1 ? 's' : ''}`;
   const list = $('historyList');
 
   if (!jobs.length) {
@@ -103,11 +131,13 @@ function renderHistory(jobs) {
     return;
   }
 
-  list.innerHTML = jobs.map((j, i) => `
+  list.innerHTML = jobs.map((j, i) => {
+    const title = displayJobTitle(j);
+    return `
     <div class="history-card" data-idx="${i}">
       <div class="history-header" onclick="toggleHistory(${i})">
         <div class="hc-left">
-          <div class="hc-title"><a href="${escapeHtml(j.job_url)}" target="_blank" onclick="event.stopPropagation()">${escapeHtml(j.job_title || j.job_id)}</a></div>
+          <div class="hc-title"><a href="${escapeHtml(j.job_url)}" target="_blank" onclick="event.stopPropagation()">${escapeHtml(title)}</a></div>
           <div class="hc-meta">
             <span>${formatDate(j.applied_at)}</span>
             ${j.company_name ? `<span>${escapeHtml(j.company_name)}</span>` : ''}
@@ -133,7 +163,8 @@ function renderHistory(jobs) {
         </div>` : ''}
       </div>
     </div>
-  `).join('');
+  `;
+  }).join('');
 }
 
 window.toggleHistory = (idx) => {
@@ -143,6 +174,7 @@ window.toggleHistory = (idx) => {
 
 function renderCharts(analytics) {
   $('todayJobsHit').textContent = analytics.recentTodayJobs ?? 0;
+  if (analytics.total != null) totalAppliedCount = analytics.total;
 
   const chartDefaults = {
     responsive: true,
@@ -204,7 +236,19 @@ $('btnStart').addEventListener('click', async () => {
     $('btnStart').disabled = false;
   }
 });
-$('btnStop').addEventListener('click', () => fetch(`${API_BASE}/api/stop`, { method: 'POST' }));
+$('btnStop').addEventListener('click', async () => {
+  $('btnStop').disabled = true;
+  updateUI({ ...lastStatus, state: 'stopping', currentAction: 'Stopping...', currentJob: null });
+  try {
+    const res = await fetch(`${API_BASE}/api/stop`, { method: 'POST' });
+    if (!res.ok) throw new Error('Stop request failed');
+    const status = await fetch(`${API_BASE}/api/status`).then((r) => r.json());
+    updateUI(status);
+  } catch {
+    addLog({ timestamp: new Date().toISOString(), level: 'error', message: 'Failed to stop agent — try again' });
+    $('btnStop').disabled = false;
+  }
+});
 $('btnReset').addEventListener('click', async () => {
   await fetch(`${API_BASE}/api/reset-daily`, { method: 'POST' });
   addLog({ timestamp: new Date().toISOString(), level: 'info', message: 'Daily lock cleared' });

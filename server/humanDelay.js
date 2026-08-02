@@ -15,8 +15,16 @@ export function getDelay(type = 'medium') {
   return randomBetween(range[0], range[1]);
 }
 
-export async function pause(type = 'medium') {
-  await new Promise((r) => setTimeout(r, getDelay(type)));
+export async function pause(type = 'medium', shouldAbort = () => false) {
+  const delay = getDelay(type);
+  const step = 200;
+  let elapsed = 0;
+  while (elapsed < delay) {
+    if (shouldAbort()) return;
+    const wait = Math.min(step, delay - elapsed);
+    await new Promise((r) => setTimeout(r, wait));
+    elapsed += wait;
+  }
 }
 
 export async function fastFill(locator, text) {

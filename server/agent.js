@@ -7,6 +7,7 @@ import {
   logActivity,
   getTodayStats,
   setConnectsExhaustedAt,
+  getAppliedJobs,
 } from './db.js';
 import { generateTailoredMessage } from './messageGenerator.js';
 import { pause, fastFill, fastClick } from './humanDelay.js';
@@ -352,21 +353,56 @@ export class JobApplicationAgent {
       await this.login();
       await this.runApplicationLoop();
     } catch (err) {
-      this.log(`Agent error: ${err.message}`, { level: 'error' });
-      this.updateStatus({ state: 'error', currentAction: 'Stopped due to error', lastError: err.message });
+      if (this.stopped) {
+        this.log('Agent stopped by user', { level: 'warn' });
+      } else {
+        this.log(`Agent error: ${err.message}`, { level: 'error' });
+        this.updateStatus({ state: 'error', currentAction: 'Stopped due to error', lastError: err.message });
+      }
     } finally {
       await this.cleanup();
       this.running = false;
-      if (this.status.state !== 'stopped_no_connects' && this.status.state !== 'error') {
-        this.updateStatus({ state: 'idle', currentAction: 'Finished' });
+      if (this.stopped) {
+        this.updateStatus({
+          state: 'idle',
+          currentAction: 'Stopped by user',
+          currentJob: null,
+          currentSearch: null,
+        });
+      } else if (this.status.state !== 'stopped_no_connects' && this.status.state !== 'error') {
+        this.updateStatus({ state: 'idle', currentAction: 'Finished', currentJob: null });
       }
     }
   }
 
   stop() {
+    if (!this.running && !this.browser) return;
     this.stopped = true;
     this.log('Stop requested', { level: 'warn' });
-    this.updateStatus({ state: 'stopping', currentAction: 'Stopping...' });
+    this.updateStatus({
+      state: 'stopping',
+      currentAction: 'Stopping...',
+      currentJob: null,
+      currentSearch: null,
+    });
+    void this.forceCloseBrowser();
+  }
+
+  async forceCloseBrowser() {
+    const page = this.page;
+    const context = this.context;
+    const browser = this.browser;
+    this.page = null;
+    this.context = null;
+    this.browser = null;
+
+    try {
+      if (page) await page.close({ runBeforeUnload: false }).catch(() => {});
+      if (context) await context.close().catch(() => {});
+      if (browser) await browser.close().catch(() => {});
+    } catch {
+      /* ignore close errors during forced stop */
+    }
   }
 
   async launchBrowser() {
@@ -392,6 +428,7 @@ export class JobApplicationAgent {
   }
 
   async waitForLoginForm() {
+    if (this.stopped) throw new Error('Stopped');
     const selectors = [
       'input[name="info[email]"]',
       'input#login_username',
@@ -533,7 +570,7 @@ export class JobApplicationAgent {
     }
 
     await this.ensureWwwSession(email, password);
-    await pause('short');
+    await pause('short', () => this.stopped);
   }
 
   async ensureWwwSession(email, password) {
@@ -619,6 +656,7 @@ export class JobApplicationAgent {
         this.log(`Opening search: ${pageUrl}`);
 
         await this.page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        if (this.stopped) break;
         await this.page.waitForTimeout(2000);
 
         // Stay on search page — do NOT navigate to v2 dashboard
@@ -626,7 +664,8 @@ export class JobApplicationAgent {
         if (currentUrl.includes('v2.onlinejobs.ph/jobseekers') && !currentUrl.includes('jobsearch')) {
           this.log('Redirected to dashboard — going back to search', { level: 'warn' });
           await this.page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-          await pause('short');
+          await pause('short', () => this.stopped);
+          if (this.stopped) break;
         }
 
         const jobs = await this.collectJobLinks(keyword);
@@ -655,13 +694,14 @@ export class JobApplicationAgent {
             if (await this.applyToJob(job)) {
               totalApplied++;
               this.updateStatus({ jobsAppliedToday: getTodayStats().jobs_applied });
-              this.emit('applied', null);
+              this.emit('applied', getAppliedJobs(200));
             }
           } catch (err) {
+            if (this.stopped) break;
             this.log(`Failed: ${job.title} — ${err.message}`, { level: 'error', jobTitle: job.title, jobUrl: job.url });
           }
 
-          await pause('between_jobs');
+          await pause('between_jobs', () => this.stopped);
         }
       }
     }
@@ -725,6 +765,7 @@ export class JobApplicationAgent {
   }
 
   async applyToJob(job) {
+    if (this.stopped) return false;
     this.updateStatus({
       state: 'applying',
       currentAction: `Opening job: ${job.title}`,
@@ -735,6 +776,7 @@ export class JobApplicationAgent {
 
     // Open job detail page on www.onlinejobs.ph
     await this.page.goto(job.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    if (this.stopped) return false;
     await this.page.waitForTimeout(3000);
 
     // Scroll to load apply button area
@@ -825,7 +867,8 @@ export class JobApplicationAgent {
     if (!applied) throw new Error('Apply For This Job button not found');
 
     await this.page.waitForURL(/\/apply/i, { timeout: 15000 }).catch(() => {});
-    await pause('short');
+    await pause('short', () => this.stopped);
+    if (this.stopped) return false;
 
     await this.fillApplicationForm({ subject, body });
     await this.submitApplication();
@@ -852,6 +895,7 @@ export class JobApplicationAgent {
       posted_label: posted.label,
       applied_at: new Date().toISOString(),
     });
+    this.emit('applied', getAppliedJobs(200));
     this.log(`Applied: ${jobTitle}`, { jobTitle, jobUrl: job.url });
     return true;
   }
@@ -875,6 +919,7 @@ export class JobApplicationAgent {
   async waitForApplyForm(timeout = 20000) {
     const deadline = Date.now() + timeout;
     while (Date.now() < deadline) {
+      if (this.stopped) return false;
       if (await this.isOnApplyForm()) return true;
       await this.page.waitForTimeout(500);
     }
@@ -900,6 +945,7 @@ export class JobApplicationAgent {
   }
 
   async clickApplyButton({ job, knownApplyHref, jobNumericId }) {
+    if (this.stopped) return false;
     // Click apply button first — OnlineJobs often uses javascript:apply() links
     if (job?.url) {
       await this.page.goto(job.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -1121,7 +1167,8 @@ export class JobApplicationAgent {
       throw new Error(`Send Email button not found${debug.length ? `: ${JSON.stringify(debug.slice(0, 8))}` : ''}`);
     }
 
-    await pause('short');
+    await pause('short', () => this.stopped);
+    if (this.stopped) return false;
     await this.readConnectsFromCurrentPage();
 
     if (this.connectsRemaining !== null && this.connectsRemaining <= MIN_CONNECTS_RESERVE) {
@@ -1130,11 +1177,7 @@ export class JobApplicationAgent {
   }
 
   async cleanup() {
-    if (this.browser) {
-      await this.browser.close().catch(() => {});
-      this.browser = null;
-      this.page = null;
-    }
+    await this.forceCloseBrowser();
   }
 }
 

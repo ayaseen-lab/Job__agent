@@ -93,9 +93,19 @@ app.post('/api/start', (_req, res) => {
 });
 
 app.post('/api/stop', (_req, res) => {
-  agent?.stop();
+  if (agent?.running) {
+    agent.stop();
+    agentStatus = {
+      ...agentStatus,
+      state: 'stopping',
+      currentAction: 'Stopping...',
+      currentJob: null,
+      totalApplied: getAppliedCount(),
+    };
+    io.emit('status', agentStatus);
+  }
   logActivity({ message: 'Agent stopped by user', level: 'warn' });
-  res.json({ ok: true });
+  res.json({ ok: true, running: !!agent?.running });
 });
 
 app.post('/api/reset-daily', (_req, res) => {
